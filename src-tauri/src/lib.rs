@@ -214,10 +214,8 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
     ]
     .into();
 
-    // 最後にイベントを送った時点の axis 値。累積変化量でしきい値判定するために使う。
-    let mut last_sent: HashMap<Axis, f32> = HashMap::new();
-    // axis の累積変化量がこれを超えたらイベント送信（0.0〜1.0 スケール）
-    const AXIS_THRESHOLD: f32 = 0.02;
+    // axis ごとの前回 value を記録（直前との差分で方向判定）
+    let mut prev_axis: HashMap<Axis, f32> = HashMap::new();
 
     std::thread::spawn(move || {
         let Ok(mut gilrs) = Gilrs::new() else {
@@ -246,12 +244,22 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
                         });
                     }
                     EventType::AxisChanged(axis, value, _) => {
-                        let prev = *last_sent.get(&axis).unwrap_or(&0.0);
-                        let delta = value - prev;
-                        // 前回送信時点からの累積変化量がしきい値を超えたときだけ送る
-                        if delta.abs() > AXIS_THRESHOLD {
-                            // 方向は今回の移動方向（delta の符号）で決める
-                            let direction: i8 = if delta > 0.0 { 1 } else { -1 };
+                        let prev = *prev_axis.get(&axis).unwrap_or(&value);
+                        prev_axis.insert(axis, value);
+
+                        // ラップアラウンド補正: 直前との差分を -1.0〜+1.0 に収める
+                        let raw_delta = value - prev;
+                        let delta = if raw_delta > 1.0 {
+                            raw_delta - 2.0
+                        } else if raw_delta < -1.0 {
+                            raw_delta + 2.0
+                        } else {
+                            raw_delta
+                        };
+
+                        // 方向を delta の符号で決める（0 に近い場合は直前の方向を維持）
+                        let direction: i8 = if delta > 0.01 { 1 } else if delta < -0.01 { -1 } else { 0 };
+                        if direction != 0 {
                             let _ = audio_tx.try_send(if direction > 0 { 600.0 } else { 500.0 });
                             let _ = app.emit("input-event", InputEvent::AxisMove {
                                 source: "gamepad".into(),
@@ -260,8 +268,6 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
                                 value,
                                 t,
                             });
-                            // 送信した時点の value を記録（次の累積計算の基点）
-                            last_sent.insert(axis, value);
                         }
                     }
                     _ => {}

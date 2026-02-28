@@ -29,7 +29,7 @@ const CANVAS_H          = 600;
 const COL_W             = 60;
 const HEADER_H          = 40;
 const TIME_WINDOW       = 3000;   // ms: 表示する時間幅
-const AXIS_TIMEOUT      = 80;     // ms: axis 停止判定
+const AXIS_TIMEOUT      = 150;    // ms: axis 停止判定（連続回転中のイベント間隔より十分大きくする）
 const SPAN_RETAIN       = TIME_WINDOW * 2; // ms: これより古いスパンを削除
 
 // ---- Canvas 描画 -----------------------------------------------------------
