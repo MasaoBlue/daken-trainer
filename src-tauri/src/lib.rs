@@ -3,12 +3,15 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::mpsc;
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 // clap.mp3 をコンパイル時にバイナリ埋め込み
 static CLAP_MP3: &[u8] = include_bytes!("../assets/clap.mp3");
+
+// フロントエンドから play_clap コマンド経由で使うグローバル送信端
+static AUDIO_TX: OnceLock<mpsc::SyncSender<f32>> = OnceLock::new();
 
 // ---- 音再生 (専用スレッド1本、スレッド増殖なし) ---------------------------
 
@@ -184,9 +187,38 @@ mod raw_keyboard {
 
     fn vkey_name(vkey: u16) -> String {
         match vkey {
-            VK_A => "A".into(),
-            VK_Q => "Q".into(),
-            VK_W => "W".into(),
+            0x08 => "BS".into(),
+            0x09 => "Tab".into(),
+            0x0D => "Enter".into(),
+            0x10 => "Shift".into(),
+            0x11 => "Ctrl".into(),
+            0x12 => "Alt".into(),
+            0x1B => "Esc".into(),
+            0x20 => "Space".into(),
+            0x21 => "PgUp".into(),
+            0x22 => "PgDn".into(),
+            0x23 => "End".into(),
+            0x24 => "Home".into(),
+            0x25 => "←".into(),
+            0x26 => "↑".into(),
+            0x27 => "→".into(),
+            0x28 => "↓".into(),
+            0x2E => "Del".into(),
+            0x30..=0x39 => ((b'0' + (vkey - 0x30) as u8) as char).to_string(),
+            0x41..=0x5A => ((b'A' + (vkey - 0x41) as u8) as char).to_string(),
+            0x60..=0x69 => format!("Num{}", vkey - 0x60),
+            0x70..=0x87 => format!("F{}", vkey - 0x6F),
+            0xBA => ";".into(),
+            0xBB => "=".into(),
+            0xBC => ",".into(),
+            0xBD => "-".into(),
+            0xBE => ".".into(),
+            0xBF => "/".into(),
+            0xC0 => "`".into(),
+            0xDB => "[".into(),
+            0xDC => "\\".into(),
+            0xDD => "]".into(),
+            0xDE => "'".into(),
             _ => format!("VK_{:02X}", vkey),
         }
     }
@@ -194,10 +226,32 @@ mod raw_keyboard {
 
 // ---- ゲームパッドリスナー --------------------------------------------------
 
-fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSender<f32>) {
-    // axis ごとの前回 value と前回 direction を記録
+fn gamepad_button_name(btn: gilrs::Button) -> String {
+    match btn {
+        gilrs::Button::South        => "Button1".into(),
+        gilrs::Button::East         => "Button2".into(),
+        gilrs::Button::West         => "Button3".into(),
+        gilrs::Button::North        => "Button4".into(),
+        gilrs::Button::LeftTrigger  => "L1".into(),
+        gilrs::Button::RightTrigger => "R1".into(),
+        gilrs::Button::LeftTrigger2 => "L2".into(),
+        gilrs::Button::RightTrigger2 => "R2".into(),
+        gilrs::Button::Select       => "Select".into(),
+        gilrs::Button::Start        => "Start".into(),
+        gilrs::Button::LeftThumb    => "L3".into(),
+        gilrs::Button::RightThumb   => "R3".into(),
+        gilrs::Button::DPadUp       => "↑".into(),
+        gilrs::Button::DPadDown     => "↓".into(),
+        gilrs::Button::DPadLeft     => "←".into(),
+        gilrs::Button::DPadRight    => "→".into(),
+        gilrs::Button::Mode         => "Mode".into(),
+        _                           => format!("{:?}", btn),
+    }
+}
+
+fn start_gamepad_listener(app: AppHandle, epoch: Instant) {
+    // axis ごとの前回 value を記録
     let mut prev_axis: HashMap<Axis, f32> = HashMap::new();
-    let mut prev_dir_map: HashMap<Axis, i8> = HashMap::new();
 
     std::thread::spawn(move || {
         let Ok(mut gilrs) = gilrs::GilrsBuilder::new()
@@ -214,14 +268,14 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
                     EventType::ButtonPressed(btn, _) => {
                         let _ = app.emit("input-event", InputEvent::ButtonDown {
                             source: "gamepad".into(),
-                            id: format!("{:?}", btn),
+                            id: gamepad_button_name(btn),
                             t,
                         });
                     }
                     EventType::ButtonReleased(btn, _) => {
                         let _ = app.emit("input-event", InputEvent::ButtonUp {
                             source: "gamepad".into(),
-                            id: format!("{:?}", btn),
+                            id: gamepad_button_name(btn),
                             t,
                         });
                     }
@@ -242,13 +296,6 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
                         // 方向を delta の符号で決める
                         let direction: i8 = if delta > 0.005 { 1 } else if delta < -0.005 { -1 } else { 0 };
                         if direction != 0 {
-                            // 前回の方向と比較して変わった瞬間だけ音を鳴らす
-                            let prev_dir = *prev_dir_map.get(&axis).unwrap_or(&0);
-                            if prev_dir != direction {
-                                let _ = audio_tx.try_send(if direction > 0 { 600.0 } else { 500.0 });
-                            }
-                            prev_dir_map.insert(axis, direction);
-
                             let _ = app.emit("input-event", InputEvent::AxisMove {
                                 source: "gamepad".into(),
                                 id: format!("{:?}", axis),
@@ -273,18 +320,28 @@ fn greet(name: &str) -> String {
     format!("Hello, {}!", name)
 }
 
+// フロントエンドから SCR 方向変化時に呼ぶ: clap 音を再生
+#[tauri::command]
+fn play_clap() {
+    if let Some(tx) = AUDIO_TX.get() {
+        let _ = tx.try_send(1.0);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let epoch    = Instant::now();
     let audio_tx = spawn_audio_thread();
+    // グローバル送信端に登録
+    let _ = AUDIO_TX.set(audio_tx.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![greet, play_clap])
         .setup(move |app| {
             #[cfg(windows)]
             raw_keyboard::start(app.handle().clone(), epoch, audio_tx.clone());
-            start_gamepad_listener(app.handle().clone(), epoch, audio_tx);
+            start_gamepad_listener(app.handle().clone(), epoch);
             Ok(())
         })
         .run(tauri::generate_context!())

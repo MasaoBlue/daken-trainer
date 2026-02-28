@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "scratch-trainer",
-        "width": 700,
-        "height": 900
+        "title": "Scratch Trainer",
+        "width": 670,
+        "height": 980
       }
     ],
     "security": {

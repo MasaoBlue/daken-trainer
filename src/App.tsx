@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Slider } from "@/components/ui/slider";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { Play, ChevronsRight, Settings } from "lucide-react";
 import "./App.css";
 
 // ---- 型定義 ----------------------------------------------------------------
@@ -9,21 +20,19 @@ type InputEvent =
   | { kind: "ButtonUp";   source: string; id: string; t: number }
   | { kind: "AxisMove";   source: string; id: string; direction: number; value: number; t: number };
 
-// キーコンフィグ: 入力ソースとレーンの対応
 interface Binding {
-  source: string;     // "keyboard" | "gamepad"
-  id: string;         // ボタンID or axisID
-  direction?: number; // axisの場合: 1=正方向(時計), -1=負方向(反時計)
+  source: string;
+  id: string;
+  direction?: number;
 }
 
-// レーンID ("SCR_POS" | "SCR_NEG" | "KEY1"〜"KEY7") → Binding
 type KeyConfig = Record<string, Binding | null>;
 
 interface Span {
-  start: number;        // JS 基準ミリ秒 (描画に使う)
+  start: number;
   end: number | null;
   direction?: number;
-  rustT?: number;       // ButtonDown 時の Rust タイムスタンプ (持続時間計算用)
+  rustT?: number;
 }
 
 interface Channel {
@@ -35,33 +44,35 @@ interface Channel {
 
 // ---- 定数 ------------------------------------------------------------------
 
-const CANVAS_H          = 700;
+const CANVAS_H          = 600;
 const HEADER_H          = 40;
-const TIME_WINDOW       = 3000;   // ms: 表示する時間幅
-const AXIS_TIMEOUT      = 150;    // ms: axis 停止判定
-const SCR_RESET_MS      = 500;    // ms: スクラッチ連続カウントリセットまでの無入力時間
-const SPAN_RETAIN       = 600000; // ms: 過去10分のスパンを保持（スクロール用）
+const TIME_WINDOW       = 3000;
+const AXIS_TIMEOUT      = 150;
+const SCR_RESET_MS      = 500;
+const SPAN_RETAIN       = 600000;
+const INTERVAL_HISTORY  = 50; // 棒グラフに表示する直近N枚分
+const CHART_W           = 520; // 棒グラフ固定幅 (px): 50枚 × 約10px/本
+const CHART_H           = 160; // 棒グラフ固定高さ (px)
 
-// ---- キーコンフィグ ユーティリティ ----------------------------------------
+// ---- ストレージキー ---------------------------------------------------------
 
 const STORAGE_KEY            = "scratch-trainer-keyconfig";
 const BPM_STORAGE_KEY        = "scratch-trainer-bpm";
 const SCR_ORIGIN_STORAGE_KEY = "scratch-trainer-scr-origin";
 const GRID_MODE_STORAGE_KEY  = "scratch-trainer-grid-mode";
 const METRO_ON_KEY           = "scratch-trainer-metro-on";
-const METRO_DIV_KEY          = "scratch-trainer-metro-div"; // "4" | "8"
+const METRO_DIV_KEY          = "scratch-trainer-metro-div";
 const METRO_VOL_KEY          = "scratch-trainer-metro-vol";
+
+// ---- キーコンフィグ ユーティリティ -----------------------------------------
 
 function loadConfig(): KeyConfig {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"); } catch { return {}; }
 }
-
 function saveConfig(cfg: KeyConfig) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
 }
 
-// 入力イベントを keyConfig に照合してレーン情報を返す
-// マッチしない場合は null（無視）
 function resolveChannel(
   cfg: KeyConfig,
   ev: InputEvent,
@@ -74,7 +85,7 @@ function resolveChannel(
     if (laneId === "SCR_NEG") return { laneId: "SCR", kind: "axis", direction: -1 };
     return { laneId, kind: "button" };
   }
-  return null; // 未割り当て → 無視
+  return null;
 }
 
 function bindingLabel(b: Binding | null | undefined): string {
@@ -83,34 +94,27 @@ function bindingLabel(b: Binding | null | undefined): string {
   return `${b.id}${dir}`;
 }
 
-// ---- レーンレイアウト定義 --------------------------------------------------
-// IIDX風レイアウト: SCR / 1 / 2 / 3 / 4 / 5 / 6 / 7
-// channel.id がここの id と一致した場合、そのレーン設定を使う。
-// 一致しないチャンネルはデフォルト設定でレーン追加される。
+// ---- レーン定義 -------------------------------------------------------------
 
 interface LaneDef {
-  id: string;           // チャンネルID（source:id の id 部分）
-  label: string;        // ヘッダ表示名
-  w: number;            // レーン幅(px)
-  // ボタン用オブジェクト色
+  id: string;
+  label: string;
+  w: number;
   noteColor: string;
-  // axis用オブジェクト色 (正方向 / 負方向)。ボタンの場合は noteColor を使う
   axisColorPos?: string;
   axisColorNeg?: string;
 }
 
-// 後で設定画面から変更可能にする想定。現在は定数で管理。
 const LANE_DEFS: LaneDef[] = [
-  { id: "SCR",    label: "SCR", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
-  { id: "KEY1",   label: "1",   w: 52,  noteColor: "#eee" },
-  { id: "KEY2",   label: "2",   w: 40,  noteColor: "#48f" },
-  { id: "KEY3",   label: "3",   w: 52,  noteColor: "#eee" },
-  { id: "KEY4",   label: "4",   w: 40,  noteColor: "#48f" },
-  { id: "KEY5",   label: "5",   w: 52,  noteColor: "#eee" },
-  { id: "KEY6",   label: "6",   w: 40,  noteColor: "#48f" },
-  { id: "KEY7",   label: "7",   w: 52,  noteColor: "#eee" },
+  { id: "SCR",  label: "SCR", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
+  { id: "KEY1", label: "1",   w: 52,  noteColor: "#eee" },
+  { id: "KEY2", label: "2",   w: 40,  noteColor: "#48f" },
+  { id: "KEY3", label: "3",   w: 52,  noteColor: "#eee" },
+  { id: "KEY4", label: "4",   w: 40,  noteColor: "#48f" },
+  { id: "KEY5", label: "5",   w: 52,  noteColor: "#eee" },
+  { id: "KEY6", label: "6",   w: 40,  noteColor: "#48f" },
+  { id: "KEY7", label: "7",   w: 52,  noteColor: "#eee" },
 ];
-
 
 // ---- Canvas 描画 -----------------------------------------------------------
 
@@ -119,47 +123,39 @@ type GridMode = "time" | "bpm" | "scr";
 function drawTimeline(
   ctx: CanvasRenderingContext2D,
   channels: Channel[],
-  viewNowMs: number,       // 描画の「現在」（スクロール中は過去の時刻）
-  realNowMs: number,       // 実際の現在時刻（アクティブスパンの上端計算に使う）
+  viewNowMs: number,
+  realNowMs: number,
   isLive: boolean,
   width: number,
   scrCount: number,
   gridMode: GridMode,
   bpm: number,
-  scrLastOriginMs: number, // scrモード用: 最後のrunのカウント開始時刻（入力が途切れても保持）
+  scrLastOriginMs: number,
+  scrLastInputMs: number,
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
-
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, width, CANVAS_H);
   ctx.fillStyle = "#222";
   ctx.fillRect(0, 0, width, HEADER_H);
 
-  // 現在時刻 (viewNowMs) = 上端 (HEADER_H)、古いほど下
   const BODY_BOTTOM = CANVAS_H - 1;
   const msPerPx = TIME_WINDOW / (BODY_BOTTOM - HEADER_H);
   const tToY = (t: number) => HEADER_H + (viewNowMs - t) / msPerPx;
 
-  // グリッド描画
   ctx.strokeStyle = "#484848";
   ctx.lineWidth = 1;
   if (gridMode === "time") {
-    // 時間グリッド (500ms ごと)
     const gridStep = 500;
     const firstGrid = Math.ceil((viewNowMs - TIME_WINDOW) / gridStep) * gridStep;
     for (let g = firstGrid; g <= viewNowMs; g += gridStep) {
       const y = tToY(g);
       if (y < HEADER_H || y > BODY_BOTTOM) continue;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
-      ctx.fillStyle = "#777";
-      ctx.font = "10px monospace";
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      ctx.fillStyle = "#777"; ctx.font = "10px monospace";
       ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
     }
   } else if (gridMode === "bpm") {
-    // BPMグリッド: 起動時刻基点、4分音符間隔
     const beatMs = 60000 / bpm;
     const firstBeat = Math.ceil((viewNowMs - TIME_WINDOW) / beatMs) * beatMs;
     let beatIdx = Math.round(firstBeat / beatMs);
@@ -168,125 +164,80 @@ function drawTimeline(
       if (y < HEADER_H || y > BODY_BOTTOM) continue;
       const isMeasure = beatIdx % 4 === 0;
       ctx.strokeStyle = isMeasure ? "#777" : "#484848";
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
       if (isMeasure) {
-        ctx.fillStyle = "#999";
-        ctx.font = "10px monospace";
+        ctx.fillStyle = "#999"; ctx.font = "10px monospace";
         ctx.fillText(`${Math.round(beatIdx / 4 + 1)}`, 2, y - 2);
       }
     }
   } else if (gridMode === "scr" && isFinite(scrLastOriginMs)) {
-    // SCR基点BPMグリッド
-    // - originより前は描画しない
-    // - 入力が途切れても最後のrunの基点からのグリッドは残す
     const origin = scrLastOriginMs;
     const beatMs = 60000 / bpm;
     const rangeStart = viewNowMs - TIME_WINDOW;
     const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
+    const scrGridEnd = isFinite(scrLastInputMs) ? scrLastInputMs : viewNowMs;
     for (let i = firstBeatOffset; ; i++) {
       const g = origin + i * beatMs;
       if (g > viewNowMs) break;
-      if (g < origin) continue; // origin より前は表示しない（i < 0 の拍）
+      if (g < origin) continue;
+      if (g > scrGridEnd) continue;
       const y = tToY(g);
       if (y < HEADER_H || y > BODY_BOTTOM) continue;
       const isMeasure = i % 4 === 0;
       ctx.strokeStyle = isMeasure ? "#779" : "#446";
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
       if (isMeasure) {
-        ctx.fillStyle = "#99b";
-        ctx.font = "10px monospace";
+        ctx.fillStyle = "#99b"; ctx.font = "10px monospace";
         ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
       }
     }
   }
 
-  // LANE_DEFS 全レーンを常に描画（入力がなくても表示）
-  // チャンネルが存在する場合はスパンも描画する
   let xOffset = 0;
   for (const lane of LANE_DEFS) {
     const x = xOffset;
     xOffset += lane.w;
-
-    // 区切り線
-    ctx.strokeStyle = "#333";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x + lane.w, HEADER_H);
-    ctx.lineTo(x + lane.w, CANVAS_H);
-    ctx.stroke();
-
-    // ヘッダ
-    ctx.fillStyle = "#ccc";
-    ctx.font = "bold 11px monospace";
+    ctx.strokeStyle = "#333"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x + lane.w, HEADER_H); ctx.lineTo(x + lane.w, CANVAS_H); ctx.stroke();
+    ctx.fillStyle = "#ccc"; ctx.font = "bold 11px monospace";
     ctx.fillText(lane.label, x + 4, HEADER_H - 6);
-
-    // SCR レーンのみ: 連続スクラッチ枚数をヘッダに表示
     if (lane.id === "SCR" && scrCount > 0) {
-      ctx.fillStyle = "#ff0";
-      ctx.font = "bold 14px monospace";
+      ctx.fillStyle = "#ff0"; ctx.font = "bold 14px monospace";
       const label = String(scrCount);
       ctx.fillText(label, x + lane.w / 2 - (label.length * 4), HEADER_H - 6);
     }
-
-    // このレーンに対応するチャンネルを検索
     const ch = channels.find((c) => c.id === lane.id);
     if (!ch) continue;
-
-    // スパン描画
     const pad = Math.max(2, Math.floor(lane.w * 0.06));
-    const TICK_H = 5; // 押し始め・押し終わりのマーカー高さ(px)
-
+    const TICK_H = 5;
     for (const span of ch.spans) {
       const activeEnd = isLive ? realNowMs : viewNowMs;
       const yTop    = span.end !== null ? tToY(span.end) : tToY(activeEnd);
       const yBottom = tToY(span.start);
-
       if (yTop > BODY_BOTTOM || yBottom < HEADER_H) continue;
-
       const drawTop    = Math.max(yTop,    HEADER_H);
       const drawBottom = Math.min(yBottom, BODY_BOTTOM);
-
-      // メインカラー決定
       const color = ch.kind === "button"
         ? lane.noteColor
-        : ((span.direction ?? 1) > 0
-          ? (lane.axisColorPos ?? lane.noteColor)
-          : (lane.axisColorNeg ?? lane.noteColor));
-
-      const lx = x + pad;
-      const lw = lane.w - pad * 2;
-
-      // --- 1. 押しっぱなし中の胴体部分（左右1px短く、半透明）---
-      const bodyTop    = Math.max(drawTop,    HEADER_H);
-      const bodyBottom = Math.min(drawBottom - TICK_H, BODY_BOTTOM); // 押し始めマーカー分を除く
+        : ((span.direction ?? 1) > 0 ? (lane.axisColorPos ?? lane.noteColor) : (lane.axisColorNeg ?? lane.noteColor));
+      const lx = x + pad, lw = lane.w - pad * 2;
+      const bodyTop    = Math.max(drawTop, HEADER_H);
+      const bodyBottom = Math.min(drawBottom - TICK_H, BODY_BOTTOM);
       if (bodyBottom > bodyTop) {
-        ctx.globalAlpha = 0.12;
-        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.12; ctx.fillStyle = color;
         ctx.fillRect(lx + 1, bodyTop, lw - 2, bodyBottom - bodyTop);
         ctx.globalAlpha = 1.0;
       }
-
-      // --- 2. 押し始めマーカー（下端 TICK_H px、フル色）---
       const startMarkerBottom = Math.min(drawBottom, BODY_BOTTOM);
       const startMarkerTop    = Math.max(startMarkerBottom - TICK_H, HEADER_H);
       if (startMarkerBottom > startMarkerTop) {
-        ctx.fillStyle = color;
-        ctx.fillRect(lx, startMarkerTop, lw, startMarkerBottom - startMarkerTop);
+        ctx.fillStyle = color; ctx.fillRect(lx, startMarkerTop, lw, startMarkerBottom - startMarkerTop);
       }
-
-      // --- 3. 押し終わりマーカー（上端 3px、胴体と同幅、中間の濃さ）--- 終了済みスパンのみ
       if (span.end !== null) {
         const endMarkerTop    = Math.max(drawTop, HEADER_H);
         const endMarkerBottom = Math.min(drawTop + 3, BODY_BOTTOM);
         if (endMarkerBottom > endMarkerTop) {
-          ctx.globalAlpha = 0.2;
-          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.2; ctx.fillStyle = color;
           ctx.fillRect(lx + 1, endMarkerTop, lw - 2, endMarkerBottom - endMarkerTop);
           ctx.globalAlpha = 1.0;
         }
@@ -294,13 +245,167 @@ function drawTimeline(
     }
   }
 
-  // 現在時刻ライン
   ctx.strokeStyle = isLive ? "#f44" : "#f80";
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, HEADER_H);
-  ctx.lineTo(width, HEADER_H);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, HEADER_H); ctx.lineTo(width, HEADER_H); ctx.stroke();
+}
+
+// ---- 棒グラフ Canvas 描画 ---------------------------------------------------
+
+interface IntervalEntry { ms: number; dir: number; }
+
+// Y軸ラベル幅（左余白）
+const CHART_PAD_L = 30;
+
+function drawBarChart(
+  ctx: CanvasRenderingContext2D,
+  intervals: IntervalEntry[],
+  bpm: number,
+  w: number,
+  h: number,
+) {
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, w, h);
+
+  // 音符区分: 4〜32の全整数（5分・7分などのタプレットも含む）
+  const ALL_DIVS = Array.from({ length: 29 }, (_, i) => i + 4); // 4〜32
+  const LABELED_DIVS = new Set([4, 8, 12, 16, 24, 32]); // 5,6,7は除去
+  // 4分=グレー(遅い) → 32分=赤(速い)
+  const NOTE_COLOR = (d: number): string => {
+    const t = (d - 4) / (32 - 4); // 0.0(4分/グレー) 〜 1.0(32分/赤)
+    const r = Math.round(80  + t * 175); // 80  → 255
+    const g = Math.round(80  - t * 60);  // 80  → 20
+    const b = Math.round(80  - t * 60);  // 80  → 20
+    return `rgb(${r},${g},${b})`;
+  };
+  const beatMs = bpm > 0 ? 60000 / bpm : 0;
+  const noteRefMs = ALL_DIVS.map(d => ({ d, ms: beatMs > 0 ? beatMs / (d / 4) : 0 }));
+  // 上=速い(小さいms=32分)、下=遅い(大きいms=4分)
+  // ALL_DIVS=[4,5,...,32] → noteRefMs[0]=d4(大きいms遅い), noteRefMs.at(-1)=d32(小さいms速い)
+  // minMs=上端=速い=小さいms=32分のms*0.5
+  // maxMs=下端=遅い=大きいms=4分のms*1.5
+  const minMs = noteRefMs.at(-1)?.ms > 0 ? noteRefMs.at(-1)!.ms * 0.5 : 10;
+  const maxMs = noteRefMs[0]?.ms > 0 ? noteRefMs[0].ms * 1.5
+    : (intervals.length > 0 ? Math.max(...intervals.map(e => e.ms)) * 1.5 : 1000);
+
+  // レイアウト
+  // 上: PAD_T, 下: PAD_B(X軸ラベル), 左: CHART_PAD_L(Y軸ラベル)
+  const PAD_T = 4;
+  const PAD_B = 14;
+  const plotX = CHART_PAD_L;      // バー描画開始X
+  const plotW = w - CHART_PAD_L;  // バー描画幅
+  const plotH = h - PAD_T - PAD_B; // バー描画高さ
+
+  // 対数スケール: 上=速い(小さいms=4分)、下=遅い(大きいms=32分)
+  const msToY = (ms: number) => {
+    const clamped = Math.max(minMs, Math.min(maxMs, ms));
+    const ratio = (Math.log(clamped) - Math.log(minMs)) / (Math.log(maxMs) - Math.log(minMs));
+    return PAD_T + Math.round(ratio * plotH); // ratioが大きい(遅い)ほど下
+  };
+
+  // バー幅: intervals数に応じて可変、最小2px、最大10px
+  // 右端が最新。左から並べ、足りない分は右端まで詰めない（左余白なし、左から順に配置）
+  const count = intervals.length;
+  const barW = count > 0 ? Math.max(2, Math.min(10, Math.floor(plotW / count))) : 8;
+  // バーが足りない場合は左詰め（右にスペースが余る）
+  // バーが多い場合は右端まで使う（INTERVAL_HISTORY以上になることはないが念のため）
+
+  // Y軸リファレンスライン（ラベルは左側）
+  for (const { d, ms } of noteRefMs) {
+    if (ms <= 0) continue;
+    const y = msToY(ms);
+    if (y < PAD_T || y > PAD_T + plotH) continue;
+    const isLabeled = LABELED_DIVS.has(d);
+    const color = NOTE_COLOR(d);
+    // ライン（バー描画エリアのみ）
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = isLabeled ? 0.75 : 0.25;
+    ctx.setLineDash(isLabeled ? [4, 3] : [2, 5]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.globalAlpha = 1.0;
+    ctx.setLineDash([]);
+    // ラベル（左側）- アウトライン付きで視認性向上
+    if (isLabeled) {
+      ctx.font = "bold 11px monospace";
+      ctx.textAlign = "right";
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeText(`${d}`, plotX - 6, y + 4);
+      ctx.fillStyle = color;
+      ctx.fillText(`${d}`, plotX - 6, y + 4);
+      ctx.textAlign = "left";
+      ctx.lineJoin = "miter";
+    }
+  }
+
+  if (count === 0) return;
+
+  // バー描画（左から並べる、最新が右端）
+  // 棒の色: 縦方向グラデーション（上=32分色(赤), 下=4分色(グレー)）+ 下端に方向インジケータ
+  const DIR_INDICATOR_H = Math.max(1, Math.floor(barW * 0.4)); // 上端の方向色の高さ
+  for (let i = 0; i < count; i++) {
+    const { ms, dir } = intervals[i];
+    const x = plotX + i * barW;
+    const yTop = Math.max(PAD_T, msToY(ms));
+    const yBottom = PAD_T + plotH;
+    const barH = yBottom - yTop;
+    if (barH <= 0) continue;
+
+    // 縦グラデーション: 下=グレー(4分/遅い) → 上(バー先端)=赤系(32分に近いほど赤)
+    const barDiv = Math.max(4, Math.min(32,
+      Math.round(4 * (60000 / (bpm > 0 ? bpm : 138)) / ms)
+    ));
+    const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
+    grad.addColorStop(0, NOTE_COLOR(barDiv)); // 上端(バー先端)=そのmsの色
+    grad.addColorStop(1, NOTE_COLOR(4));      // 下端=4分=グレー
+    // 上端: 方向インジケータ（↻=#4f8, ↺=#fa4）
+    const dirColor = dir > 0 ? "#4f8" : "#fa4";
+    const bx = x, bw = barW - 1; // 右に1px隙間を空けてバー同士を分離
+    ctx.fillStyle = dirColor;
+    ctx.fillRect(bx, yTop, bw, DIR_INDICATOR_H);
+
+    if (i === 0) {
+      // 最初の1本目は単色
+      ctx.fillStyle = dirColor;
+    } else {
+      ctx.fillStyle = grad;
+    }
+    ctx.fillRect(bx, yTop + DIR_INDICATOR_H, bw, barH - DIR_INDICATOR_H);
+  }
+
+  // X軸ラベル（枚数: 1, 10, 20...）
+  ctx.fillStyle = "#666";
+  ctx.font = "9px monospace";
+  ctx.textAlign = "left";
+  const tickIntervals = [1, 10, 20, 30, 40, 50];
+  for (const n of tickIntervals) {
+    if (n > count) break;
+    const idx = n - 1; // 0-based
+    const x = plotX + idx * barW + barW / 2;
+    // 目盛り線
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, PAD_T + plotH); ctx.lineTo(x, PAD_T + plotH + 3); ctx.stroke();
+    // ラベル
+    ctx.fillText(String(n), x - (n >= 10 ? 5 : 2), h - 2);
+  }
+}
+
+// ---- 音符区分ヘルパー -------------------------------------------------------
+
+// BPMと間隔msから最も近い音符区分を返す（4〜32の全整数）
+function nearestNoteDivision(intervalMs: number, bpm: number): string {
+  const beatMs = 60000 / bpm;
+  let best = 4, bestDiff = Infinity;
+  for (let d = 4; d <= 32; d++) {
+    const noteMs = beatMs / (d / 4);
+    const diff = Math.abs(intervalMs - noteMs);
+    if (diff < bestDiff) { bestDiff = diff; best = d; }
+  }
+  return `${best}分`;
 }
 
 // ---- メインコンポーネント --------------------------------------------------
@@ -312,15 +417,13 @@ export default function App() {
   const axisLastRef     = useRef<Map<string, number>>(new Map());
   const rafRef          = useRef<number>(0);
   const startRef        = useRef<number>(performance.now());
-  // 再生状態管理
-  // mode: "live"    → viewMs = realNowMs（常に最新に追従）
-  //       "paused"  → viewMs 固定（操作で一時停止）
-  //       "playing" → viewMs = viewMs + (realNowMs - startedAt) で一定速度再生
+
   type PlaybackMode = "live" | "paused" | "playing";
   const playbackRef = useRef<{ mode: PlaybackMode; viewMs: number; startedAt: number }>({
     mode: "live", viewMs: 0, startedAt: 0,
   });
   const dragRef  = useRef<{ startY: number; startViewMs: number } | null>(null);
+  const pausedMaxMsRef = useRef<number | null>(null); // paused中に固定するスライダーmax
   const sliderRef = useRef<HTMLInputElement>(null);
 
   const [channelCount, setChannelCount] = useState(0);
@@ -344,7 +447,7 @@ export default function App() {
     return isNaN(v) ? 138 : v;
   })());
 
-  // メトロノーム設定
+  // メトロノーム
   const [metroOn, setMetroOn] = useState(() => localStorage.getItem(METRO_ON_KEY) === "1");
   const metroOnRef = useRef(localStorage.getItem(METRO_ON_KEY) === "1");
   const [metroDiv, setMetroDiv] = useState<4 | 8>(() => localStorage.getItem(METRO_DIV_KEY) === "8" ? 8 : 4);
@@ -357,31 +460,47 @@ export default function App() {
     const v = parseFloat(localStorage.getItem(METRO_VOL_KEY) ?? "0.5");
     return isNaN(v) ? 0.5 : Math.max(0, Math.min(1, v));
   })());
-  // AudioContext（初回インタラクション後に生成）
   const audioCtxRef = useRef<AudioContext | null>(null);
-  // 次にスケジュール済みの拍インデックス（メトロノーム先読み管理）
-  const metroNextBeatRef = useRef<number | null>(null); // 次に鳴らすべき拍インデックス
+  const metroNextBeatRef = useRef<number | null>(null);
 
-  // スクラッチ連続枚数カウント
+  // SCR カウント・情報
   const [_scrCount, setScrCount] = useState(0);
-  const scrCountRef = useRef(0);
-  const scrLastTimeRef = useRef<number>(-Infinity); // 最後にSCR方向変化があった時刻
-  const scrLastDirRef = useRef<number>(0);          // 最後のSCR方向
-  const scrOriginRef = useRef<number>(-Infinity);   // 現在runのカウント開始時刻（run中のみ有効）
-  const scrLastOriginRef = useRef<number>((() => {
-    // localStorageにはwall-clock(Date.now())で保存。起動時にperformance.now()基準に変換。
+  const scrCountRef     = useRef(0);
+  const scrLastTimeRef  = useRef<number>(-Infinity);
+  const scrLastDirRef   = useRef<number>(0);
+
+  interface ScrInfo {
+    count: number;
+    intervalMs: number | null;
+    estimatedBpm: number | null;
+    offsetMs: number | null;
+    noteDivision: string | null;
+  }
+  const [scrInfo, setScrInfo] = useState<ScrInfo>({
+    count: 0, intervalMs: null, estimatedBpm: null, offsetMs: null, noteDivision: null,
+  });
+  const [scrActive, setScrActive] = useState(false);
+  const scrIntervalHistRef  = useRef<number[]>([]);
+  const scrPrevDirTimeRef   = useRef<number | null>(null);
+  const scrOriginRef        = useRef<number>(-Infinity);
+  const scrLastOriginRef    = useRef<number>((() => {
     const saved = parseFloat(localStorage.getItem(SCR_ORIGIN_STORAGE_KEY) ?? "");
     if (!isFinite(saved)) return -Infinity;
-    const offsetMs = Date.now() - saved; // 保存時からの経過時間
-    return -offsetMs; // performance.now()基準では負値（過去）
+    return -(Date.now() - saved);
   })());
 
-  // キーコンフィグ state（ref も持つ：イベントハンドラ内から最新値参照するため）
+  // 棒グラフ用: 直近INTERVAL_HISTORY件の間隔履歴
+  const intervalHistoryRef = useRef<IntervalEntry[]>([]);
+  const chartCanvasRef = useRef<HTMLCanvasElement>(null);
+  const chartCtxRef    = useRef<CanvasRenderingContext2D | null>(null);
+  const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry } | null>(null);
+
+  // キーコンフィグ
   const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
-  const keyConfigRef = useRef<KeyConfig>(loadConfig());
+  const keyConfigRef    = useRef<KeyConfig>(loadConfig());
   const [showConfig, setShowConfig] = useState(false);
   const [assigningTarget, setAssigningTarget] = useState<string | null>(null);
-  const assigningRef = useRef<string | null>(null);
+  const assigningRef    = useRef<string | null>(null);
 
   // チャンネル取得/作成
   const getOrCreateChannel = useRef((source: string, id: string, kind: "button" | "axis"): Channel => {
@@ -401,9 +520,8 @@ export default function App() {
       const ev = e.payload;
       const nowJs = performance.now() - startRef.current;
 
-      // コンフィグ割り当てモード: ButtonDown か AxisMove だけを受け付ける（ButtonUp は無視）
       if (assigningRef.current !== null) {
-        if (ev.kind === "ButtonUp") return; // ButtonUp は無視して待ち続ける
+        if (ev.kind === "ButtonUp") return;
         const target = assigningRef.current;
         const binding: Binding = ev.kind === "AxisMove"
           ? { source: ev.source, id: ev.id, direction: ev.direction }
@@ -412,24 +530,82 @@ export default function App() {
         keyConfigRef.current = newCfg;
         setKeyConfig(newCfg);
         saveConfig(newCfg);
-        assigningRef.current = null;
-        setAssigningTarget(null);
+        // 同じボタンの再割り当てができるよう assigningTarget はリセットしない
         return;
       }
 
-      // 通常モード: resolveChannel でレーンIDを決定（未割り当ては無視）
       const resolved = resolveChannel(keyConfigRef.current, ev);
       if (resolved === null) return;
+
+      // SCR 方向変化処理（ButtonDown / AxisMove 共通）
+      const handleScrDirectionChange = (dir: number) => {
+        if (dir === scrLastDirRef.current) return;
+        scrLastDirRef.current = dir;
+        const prevTime = scrLastTimeRef.current;
+        scrLastTimeRef.current = nowJs;
+        if (scrCountRef.current === 0) {
+          scrOriginRef.current = nowJs;
+          scrLastOriginRef.current = nowJs;
+          const wallNow = Date.now() - performance.now() + nowJs + startRef.current;
+          localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
+          scrIntervalHistRef.current = [];
+          scrPrevDirTimeRef.current = nowJs;
+          intervalHistoryRef.current = [];
+        }
+        scrCountRef.current += 1;
+        setScrCount(scrCountRef.current);
+        invoke("play_clap").catch(() => {});
+
+        let intervalMs: number | null = null;
+        let estimatedBpm: number | null = null;
+        let offsetMs: number | null = null;
+        let noteDivision: string | null = null;
+
+        if (scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
+          intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
+
+          // 棒グラフ履歴を更新
+          intervalHistoryRef.current = [
+            ...intervalHistoryRef.current.slice(-(INTERVAL_HISTORY - 1)),
+            { ms: intervalMs, dir },
+          ];
+
+          const elapsedMs = nowJs - scrOriginRef.current;
+          if (elapsedMs > 0 && scrCountRef.current >= 2) {
+            estimatedBpm = Math.floor((scrCountRef.current / 2) / (elapsedMs / 60000));
+          }
+          const gm = gridModeRef.current;
+          const bpmVal = bpmRef.current;
+          if ((gm === "bpm" || gm === "scr") && bpmVal > 0) {
+            const beatMs = 60000 / bpmVal;
+            const origin = gm === "scr" ? scrLastOriginRef.current : 0;
+            if (isFinite(origin)) {
+              const beatPhase = ((nowJs - origin) % beatMs + beatMs) % beatMs;
+              const raw = beatPhase <= beatMs / 2 ? beatPhase : beatPhase - beatMs;
+              offsetMs = raw >= 0 ? Math.floor(raw) : -Math.floor(-raw);
+            }
+          }
+          // 音符区分（設定BPMを基準に判定）
+          if (bpmVal > 0) {
+            noteDivision = nearestNoteDivision(intervalMs, bpmVal);
+          }
+        }
+        scrPrevDirTimeRef.current = nowJs;
+        setScrInfo({ count: scrCountRef.current, intervalMs, estimatedBpm, offsetMs, noteDivision });
+        setScrActive(true);
+      };
 
       if (ev.kind === "ButtonDown") {
         const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
         const last = ch.spans.at(-1);
         if (resolved.kind === "axis" && last && last.end === null && last.direction !== resolved.direction) {
-          // axis チャンネルで方向が変わった場合: 現在のスパンを閉じて新しい方向でスパン開始
           last.end = nowJs;
           ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
         } else if (!last || last.end !== null) {
           ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
+        }
+        if (resolved.laneId === "SCR" && resolved.direction !== undefined) {
+          handleScrDirectionChange(resolved.direction);
         }
       } else if (ev.kind === "ButtonUp") {
         const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
@@ -450,119 +626,101 @@ export default function App() {
           last.end = nowJs;
           ch.spans.push({ start: nowJs, end: null, direction: dir });
         }
-        // SCRレーンの方向変化でカウントアップ
-        if (resolved.laneId === "SCR" && dir !== scrLastDirRef.current) {
-          scrLastDirRef.current = dir;
-          scrLastTimeRef.current = nowJs;
-          if (scrCountRef.current === 0) {
-            scrOriginRef.current = nowJs;     // 現在runの基点
-            scrLastOriginRef.current = nowJs; // 最後のrunの基点（消えない）
-            // wall-clock(Date.now())で保存: nowJs = performance.now() - startRef.current
-            const wallNow = Date.now() - performance.now() + nowJs + startRef.current;
-            localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
-          }
-          scrCountRef.current += 1;
-          setScrCount(scrCountRef.current);
-        }
+        if (resolved.laneId === "SCR") handleScrDirectionChange(dir);
       }
     });
-
     return () => { unlisten.then((f) => f()); };
   }, [getOrCreateChannel]);
 
-  // Canvas コンテキストのキャッシュ
   useEffect(() => {
-    if (canvasRef.current) {
-      ctxRef.current = canvasRef.current.getContext("2d");
+    if (canvasRef.current) ctxRef.current = canvasRef.current.getContext("2d");
+    if (chartCanvasRef.current) chartCtxRef.current = chartCanvasRef.current.getContext("2d");
+    if (metroOnRef.current) {
+      const ac = new AudioContext();
+      audioCtxRef.current = ac;
+      if (ac.state === "suspended") ac.resume();
     }
   }, []);
 
-  // メトロノームのクリック音を AudioContext でスケジューリング
-  // isMeasure=true → 高音(880Hz), false → 中音(440Hz), isHalf=true → 8分音符(330Hz)
-  const scheduleClick = (audioCtx: AudioContext, atTime: number, isMeasure: boolean, isHalf: boolean, vol: number) => {
+  // kind: "beat1"=1拍目, "beat234"=2〜4拍目, "eighth"=8分裏
+  const scheduleClick = (audioCtx: AudioContext, atTime: number, kind: "beat1" | "beat234" | "eighth", vol: number) => {
     const gainNode = audioCtx.createGain();
     gainNode.connect(audioCtx.destination);
-    const freq = isMeasure ? 880 : isHalf ? 330 : 440;
-    const peakVol = isHalf ? vol * 0.5 : vol;
-    gainNode.gain.setValueAtTime(peakVol, atTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, atTime + 0.04);
+    const freq    = kind === "beat1" ? 880 : 440;
+    const peakVol = kind === "beat1" ? vol : vol * 0.4;
+    const decay   = kind === "beat1" ? 0.08 : 0.05;
+    // 柔らかいアタック: 短いランプアップ後にdecay
+    gainNode.gain.setValueAtTime(0, atTime);
+    gainNode.gain.linearRampToValueAtTime(peakVol, atTime + 0.005);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, atTime + decay);
     const osc = audioCtx.createOscillator();
-    osc.type = "square";
+    osc.type = "sine";
     osc.frequency.setValueAtTime(freq, atTime);
     osc.connect(gainNode);
     osc.start(atTime);
-    osc.stop(atTime + 0.05);
+    osc.stop(atTime + decay + 0.01);
   };
 
-  // RAF 描画ループ
   useEffect(() => {
     const loop = () => {
       const nowMs = performance.now() - startRef.current;
-
-      // メトロノーム先読みスケジューリング
-      const LOOKAHEAD_MS = 120; // 先読み時間
+      const LOOKAHEAD_MS = 120;
       if (metroOnRef.current && audioCtxRef.current) {
         const ac = audioCtxRef.current;
         const gm = gridModeRef.current;
         const bpmVal = bpmRef.current;
         if ((gm === "bpm" || gm === "scr") && bpmVal > 0) {
-          // メトロノームは常にepoch基点（起動時刻=0）で一定間隔に鳴らし続ける
-          // SCRモードでもグリッド表示の基点とは独立して動作する
           const origin = 0;
-          if (true) {
-            const beatMs = 60000 / bpmVal;
-            const subDiv = metroDivRef.current; // 4 or 8
-            const subMs = beatMs / (subDiv / 4);   // 4分=beatMs, 8分=beatMs/2
-            // 現在時刻に対応するサブ拍インデックス
-            const nowBeat = Math.floor((nowMs - origin) / subMs);
-            if (metroNextBeatRef.current === null || metroNextBeatRef.current <= nowBeat) {
-              metroNextBeatRef.current = nowBeat;
-            }
-            // 先読み範囲内の拍をスケジュール
-            while (true) {
-              const beatIdx: number = metroNextBeatRef.current!;
-              const beatTimeMs = origin + beatIdx * subMs;
-              if (beatTimeMs > nowMs + LOOKAHEAD_MS) break;
-              if (beatTimeMs >= nowMs - 10) { // 過去10ms以内なら許容してスケジュール
-                const acTime = ac.currentTime + (beatTimeMs - nowMs) / 1000;
-                if (acTime >= ac.currentTime) {
-                  const quarterIdx = Math.round((beatTimeMs - origin) / beatMs);
-                  const isMeasure = quarterIdx % 4 === 0;
-                  const isHalf = subDiv === 8 && beatIdx % 2 !== 0;
-                  scheduleClick(ac, acTime, isMeasure, isHalf, metroVolRef.current);
-                }
+          const beatMs = 60000 / bpmVal;
+          const subDiv = metroDivRef.current;
+          const subMs = beatMs / (subDiv / 4);
+          const nowBeat = Math.floor((nowMs - origin) / subMs);
+          if (metroNextBeatRef.current === null || metroNextBeatRef.current <= nowBeat) {
+            metroNextBeatRef.current = nowBeat;
+          }
+          while (true) {
+            const beatIdx: number = metroNextBeatRef.current!;
+            const beatTimeMs = origin + beatIdx * subMs;
+            if (beatTimeMs > nowMs + LOOKAHEAD_MS) break;
+            if (beatTimeMs >= nowMs - 10) {
+              const acTime = ac.currentTime + (beatTimeMs - nowMs) / 1000;
+              if (acTime >= ac.currentTime) {
+                // 4分: beatIdx=0,1,2,3... → 4拍ごとに beat1
+                // 8分: beatIdx=0,1,2,...7,8... → 8拍ごとに beat1、それ以外は eighth
+                const isMeasureBeat = subDiv === 8
+                  ? beatIdx % 8 === 0
+                  : Math.floor((beatTimeMs - origin) / beatMs + 0.01) % 4 === 0;
+                const isEighth = subDiv === 8 && !isMeasureBeat;
+                const kind = isMeasureBeat ? "beat1" : isEighth ? "eighth" : "beat234";
+                scheduleClick(ac, acTime, kind, metroVolRef.current);
               }
-              metroNextBeatRef.current = beatIdx + 1;
             }
+            metroNextBeatRef.current = beatIdx + 1;
           }
         }
       }
-      // メトロノームがオフになったら次回スケジュールをリセット
-      if (!metroOnRef.current) {
-        metroNextBeatRef.current = null;
-      }
+      if (!metroOnRef.current) metroNextBeatRef.current = null;
 
-      // axis タイムアウト
       axisLastRef.current.forEach((lastT, key) => {
         if (nowMs - lastT > AXIS_TIMEOUT) {
           const ch = channelsRef.current.find((c) => `${c.source}:${c.id}` === key);
           const last = ch?.spans.at(-1);
-          if (last && last.end === null) {
-            last.end = lastT + AXIS_TIMEOUT / 2;
-          }
+          if (last && last.end === null) last.end = lastT + AXIS_TIMEOUT / 2;
           axisLastRef.current.delete(key);
         }
       });
 
-      // SCR連続カウントリセット（一定時間入力がなければ0に）
       if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > SCR_RESET_MS) {
         scrCountRef.current = 0;
         scrLastDirRef.current = 0;
-        scrOriginRef.current = -Infinity; // 現在runは終了（scrLastOriginRefは保持）
+        scrOriginRef.current = -Infinity;
+        scrPrevDirTimeRef.current = null;
+        scrIntervalHistRef.current = [];
         setScrCount(0);
+        setScrInfo(prev => ({ ...prev, count: 0 })); // 値は保持、枚数だけリセット
+        setScrActive(false);
       }
 
-      // 古いスパンを削除
       const cutoff = nowMs - SPAN_RETAIN;
       for (const ch of channelsRef.current) {
         if (ch.spans.length > 0 && (ch.spans[0].end ?? nowMs) < cutoff) {
@@ -570,96 +728,85 @@ export default function App() {
         }
       }
 
-
-      // 再生モードに応じて viewNowMs を計算
       const pb = playbackRef.current;
       let viewNowMs: number;
       if (pb.mode === "live") {
-        viewNowMs = nowMs;
-        pb.viewMs = nowMs;
+        viewNowMs = nowMs; pb.viewMs = nowMs;
       } else if (pb.mode === "playing") {
         viewNowMs = pb.viewMs + (nowMs - pb.startedAt);
-        // ライブに追いついたら live に戻す
         if (viewNowMs >= nowMs) {
-          viewNowMs = nowMs;
-          pb.mode = "live";
-          pb.viewMs = nowMs;
-          setMode("live");
+          viewNowMs = nowMs; pb.mode = "live"; pb.viewMs = nowMs; setMode("live");
         }
       } else {
-        // paused
         viewNowMs = pb.viewMs;
       }
 
-      // スライダーを同期（ドラッグ中でない場合のみ）
-      // min=nowMs-SPAN_RETAIN(最古), max=nowMs(最新), value=viewNowMs
-      // writingMode: vertical-lr なので value=max が下端(最新)、value=min が上端(最古)
       if (sliderRef.current && !dragRef.current) {
-        const minMs = Math.max(0, nowMs - SPAN_RETAIN);
+        const sliderMax = pb.mode === "live" ? nowMs : (pausedMaxMsRef.current ?? nowMs);
+        const minMs = Math.max(0, sliderMax - SPAN_RETAIN);
         sliderRef.current.min = String(minMs);
-        sliderRef.current.max = String(nowMs);
+        sliderRef.current.max = String(sliderMax);
         sliderRef.current.value = String(viewNowMs);
       }
 
       if (ctxRef.current && canvasRef.current) {
-        drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live", canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current, scrLastOriginRef.current);
+        drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
+          canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
+          scrLastOriginRef.current, scrLastTimeRef.current);
       }
-
+      if (chartCtxRef.current) {
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, CHART_W, CHART_H);
+      }
       rafRef.current = requestAnimationFrame(loop);
     };
-
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
   }, []);
 
-  // マウスホイール・ドラッグのイベント登録
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const msPerPx = TIME_WINDOW / (CANVAS_H - 1 - HEADER_H);
-
     const pause = (viewMs: number) => {
-      playbackRef.current = { mode: "paused", viewMs, startedAt: 0 };
+      if (pausedMaxMsRef.current === null) {
+        pausedMaxMsRef.current = performance.now() - startRef.current;
+      }
+      const minMs = Math.max(0, (pausedMaxMsRef.current ?? 0) - SPAN_RETAIN);
+      playbackRef.current = { mode: "paused", viewMs: Math.max(minMs, viewMs), startedAt: 0 };
       setMode("paused");
     };
-
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const nowMs = performance.now() - startRef.current;
       const pb = playbackRef.current;
-      const currentView = pb.mode === "live" ? nowMs
-        : pb.mode === "playing" ? pb.viewMs + (nowMs - pb.startedAt)
-        : pb.viewMs;
-      const newView = Math.max(TIME_WINDOW, Math.min(currentView - e.deltaY * msPerPx, nowMs));
-      pause(newView);
+      const cur = pb.mode === "live" ? nowMs : pb.mode === "playing" ? pb.viewMs + (nowMs - pb.startedAt) : pb.viewMs;
+      const next = cur + e.deltaY * msPerPx;
+      if (next >= nowMs) {
+        pausedMaxMsRef.current = null;
+        playbackRef.current = { mode: "live", viewMs: nowMs, startedAt: 0 };
+        setMode("live");
+      } else {
+        pause(next);
+      }
     };
-
     const onMouseDown = (e: MouseEvent) => {
       const nowMs = performance.now() - startRef.current;
       const pb = playbackRef.current;
-      const currentView = pb.mode === "live" ? nowMs
-        : pb.mode === "playing" ? pb.viewMs + (nowMs - pb.startedAt)
-        : pb.viewMs;
-      dragRef.current = { startY: e.clientY, startViewMs: currentView };
-      pause(currentView);
+      const cur = pb.mode === "live" ? nowMs : pb.mode === "playing" ? pb.viewMs + (nowMs - pb.startedAt) : pb.viewMs;
+      dragRef.current = { startY: e.clientY, startViewMs: cur };
+      pause(cur);
     };
-
     const onMouseMove = (e: MouseEvent) => {
       if (!dragRef.current) return;
       const nowMs = performance.now() - startRef.current;
-      const dy = dragRef.current.startY - e.clientY; // 上ドラッグ = 過去方向
-      const newView = Math.max(TIME_WINDOW, Math.min(dragRef.current.startViewMs + dy * msPerPx, nowMs));
-      playbackRef.current.viewMs = newView;
+      const dy = e.clientY - dragRef.current.startY;
+      playbackRef.current.viewMs = Math.max(TIME_WINDOW, Math.min(dragRef.current.startViewMs + dy * msPerPx * 3, nowMs));
     };
-
     const onMouseUp = () => { dragRef.current = null; };
-
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("mousedown", onMouseDown);
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
-
     return () => {
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("mousedown", onMouseDown);
@@ -668,110 +815,100 @@ export default function App() {
     };
   }, []);
 
-  // ここから再生: 現在の viewMs を起点に一定速度で再生開始
   const startPlaying = () => {
     const nowMs = performance.now() - startRef.current;
-    const pb = playbackRef.current;
-    const currentView = pb.mode === "paused" ? pb.viewMs : nowMs;
-    playbackRef.current = { mode: "playing", viewMs: currentView, startedAt: nowMs };
+    const cur = playbackRef.current.mode === "paused" ? playbackRef.current.viewMs : nowMs;
+    playbackRef.current = { mode: "playing", viewMs: cur, startedAt: nowMs };
     setMode("playing");
   };
-
-  // ライブに戻る: 最新時刻に即ジャンプして追従再開
   const goLive = () => {
     const nowMs = performance.now() - startRef.current;
+    pausedMaxMsRef.current = null;
     playbackRef.current = { mode: "live", viewMs: nowMs, startedAt: 0 };
     setMode("live");
   };
-
   const onSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // value が絶対時刻(viewNowMs)なのでそのまま使う
-    const newView = Number(e.target.value);
-    playbackRef.current = { mode: "paused", viewMs: newView, startedAt: 0 };
-    setMode("paused");
+    const val = Number(e.target.value);
+    const max = Number(e.target.max);
+    if (max > 0 && val >= max) {
+      goLive();
+    } else {
+      // 初めてpausedに入る瞬間にmaxを固定
+      if (playbackRef.current.mode === "live") {
+        pausedMaxMsRef.current = performance.now() - startRef.current;
+      }
+      playbackRef.current = { mode: "paused", viewMs: val, startedAt: 0 };
+      setMode("paused");
+    }
   };
 
-  // LANE_DEFS 全レーン幅の合計（固定）
   const width = LANE_DEFS.reduce((s, d) => s + d.w, 0);
 
-  const btnBase: React.CSSProperties = {
-    padding: "6px 14px",
-    border: "none",
-    borderRadius: 4,
-    fontFamily: "monospace",
-    fontWeight: "bold",
-    cursor: "pointer",
-  };
-
-  // キーコンフィグ: 割り当てボタンのスタイル
-  const assignBtnStyle = (target: string): React.CSSProperties => {
-    const isAssigning = assigningTarget === target;
-    const hasBinding = !!keyConfig[target];
-    return {
-      border: isAssigning ? "2px solid #f80" : hasBinding ? "2px solid #2a4" : "2px solid #555",
-      background: isAssigning ? "#3a2000" : hasBinding ? "#0a2010" : "#1a1a1a",
-      cursor: "pointer",
-      fontFamily: "monospace",
-      fontSize: 10,
-      color: isAssigning ? "#f80" : hasBinding ? "#4f8" : "#888",
-      display: "flex",
-      flexDirection: "column" as const,
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 2,
-      userSelect: "none" as const,
-    };
-  };
-
-  const startAssigning = (target: string) => {
-    assigningRef.current = target;
-    setAssigningTarget(target);
-  };
-
+  // キーコンフィグ操作
+  const startAssigning = (target: string) => { assigningRef.current = target; setAssigningTarget(target); };
   const clearBinding = (target: string) => {
     const newCfg = { ...keyConfigRef.current, [target]: null };
-    keyConfigRef.current = newCfg;
-    setKeyConfig(newCfg);
-    saveConfig(newCfg);
+    keyConfigRef.current = newCfg; setKeyConfig(newCfg); saveConfig(newCfg);
   };
-
   const clearAll = () => {
     const newCfg: KeyConfig = {};
-    keyConfigRef.current = newCfg;
-    setKeyConfig(newCfg);
-    saveConfig(newCfg);
-    assigningRef.current = null;
-    setAssigningTarget(null);
+    keyConfigRef.current = newCfg; setKeyConfig(newCfg); saveConfig(newCfg);
+    assigningRef.current = null; setAssigningTarget(null);
   };
+  const closeConfig = () => { assigningRef.current = null; setAssigningTarget(null); setShowConfig(false); };
 
-  const closeConfig = () => {
-    assigningRef.current = null;
-    setAssigningTarget(null);
-    setShowConfig(false);
-  };
-
-  // KEY1〜KEY7のレーン定義（黒鍵/白鍵）
   const KEY_DEFS = [
-    { id: "KEY1", label: "1", black: false },
-    { id: "KEY2", label: "2", black: true  },
-    { id: "KEY3", label: "3", black: false },
-    { id: "KEY4", label: "4", black: true  },
-    { id: "KEY5", label: "5", black: false },
-    { id: "KEY6", label: "6", black: true  },
+    { id: "KEY1", label: "1", black: false }, { id: "KEY2", label: "2", black: true  },
+    { id: "KEY3", label: "3", black: false }, { id: "KEY4", label: "4", black: true  },
+    { id: "KEY5", label: "5", black: false }, { id: "KEY6", label: "6", black: true  },
     { id: "KEY7", label: "7", black: false },
   ];
 
-  return (
-    <main style={{ background: "#111", minHeight: "100vh", color: "#eee", fontFamily: "monospace", padding: 16 }}>
+  // オフセット色
+  const offsetColor = scrInfo.offsetMs === null ? "text-muted-foreground"
+    : Math.abs(scrInfo.offsetMs) < 20 ? "text-green-400"
+    : Math.abs(scrInfo.offsetMs) < 50 ? "text-yellow-400"
+    : "text-red-400";
 
-      {/* canvas + 縦スライダー + グリッド設定 */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 4, overflowX: "auto" }}>
+  return (
+    <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4">
+
+      {/* 操作ボタン */}
+      <div className="flex gap-2 items-center">
+        <Button
+          variant="outline"
+          onClick={startPlaying}
+          disabled={mode === "live" || mode === "playing"}
+        >
+          <Play className="w-4 h-4" /> ここから再生
+        </Button>
+        <Button
+          variant={mode !== "live" ? "outline" : "secondary"}
+          onClick={goLive}
+          disabled={mode === "live"}
+        >
+          <ChevronsRight className="w-4 h-4" /> ライブに戻る
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => setShowConfig(true)}
+          className="ml-auto"
+        >
+          <Settings className="w-4 h-4" /> Key Config
+        </Button>
+      </div>
+
+      {/* メイン行: canvas + スライダー + 設定パネル */}
+      <div className="flex items-start gap-2 overflow-x-auto">
+
+        {/* Canvas */}
         <canvas
           ref={canvasRef}
           width={width}
           height={CANVAS_H}
-          style={{ display: "block", border: "1px solid #333", cursor: "grab", flexShrink: 0 }}
+          className="block border border-border cursor-grab shrink-0"
         />
+
         {/* 縦スライダー */}
         <input
           ref={sliderRef}
@@ -779,302 +916,307 @@ export default function App() {
           min={0}
           defaultValue={0}
           onChange={onSliderChange}
-          style={{
-            writingMode: "vertical-lr",
-            width: 28,
-            height: CANVAS_H,
-            cursor: "pointer",
-            accentColor: "#f80",
-          }}
+          className="cursor-pointer accent-primary shrink-0"
+          style={{ writingMode: "vertical-lr", width: 28, height: CANVAS_H }}
         />
-        {/* グリッド切り替え */}
-        <div style={{
-          display: "flex", flexDirection: "column", gap: 8,
-          padding: "8px 10px", background: "#1a1a1a", border: "1px solid #333",
-          borderRadius: 6, fontSize: 12, fontFamily: "monospace", color: "#aaa",
-          height: "fit-content", flexShrink: 0,
-        }}>
-          <div style={{ color: "#666", fontSize: 10, marginBottom: 2 }}>グリッド</div>
-          {(["time", "bpm", "scr"] as GridMode[]).map(m => (
-            <label key={m} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-              <input
-                type="radio"
-                name="gridMode"
-                value={m}
-                checked={gridMode === m}
-                onChange={() => { setGridMode(m); gridModeRef.current = m; localStorage.setItem(GRID_MODE_STORAGE_KEY, m); }}
-                style={{ accentColor: "#f80" }}
-              />
-              {m === "time" ? "時間" : m === "bpm" ? "BPM" : "SCR基点"}
-            </label>
-          ))}
-          {(gridMode === "bpm" || gridMode === "scr") && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-              <input
-                type="number"
-                min={1} max={999}
-                value={bpm}
-                onChange={e => {
-                  const v = Math.max(1, Math.min(999, Number(e.target.value)));
-                  setBpm(v);
-                  bpmRef.current = v;
-                  metroNextBeatRef.current = null; // BPM変更時はスケジュールリセット
-                  localStorage.setItem(BPM_STORAGE_KEY, String(v));
-                }}
-                style={{
-                  width: 60, background: "#111", border: "1px solid #444",
-                  color: "#eee", fontFamily: "monospace", fontSize: 13,
-                  padding: "2px 4px", borderRadius: 3,
-                }}
-              />
-              <span style={{ color: "#555", fontSize: 10 }}>BPM</span>
 
-              {/* メトロノーム設定 */}
-              <div style={{ borderTop: "1px solid #333", paddingTop: 6, marginTop: 2, display: "flex", flexDirection: "column", gap: 5 }}>
-                <div style={{ color: "#666", fontSize: 10 }}>メトロノーム</div>
-                {/* ON/OFF */}
-                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={metroOn}
-                    onChange={e => {
-                      const on = e.target.checked;
-                      setMetroOn(on);
-                      metroOnRef.current = on;
-                      metroNextBeatRef.current = null;
-                      localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
-                      // AudioContext を初回ON時に生成
-                      if (on && !audioCtxRef.current) {
-                        audioCtxRef.current = new AudioContext();
-                      }
-                      if (on && audioCtxRef.current?.state === "suspended") {
-                        audioCtxRef.current.resume();
-                      }
-                    }}
-                    style={{ accentColor: "#f80" }}
-                  />
-                  <span style={{ color: metroOn ? "#f80" : "#666", fontSize: 11 }}>
-                    {metroOn ? "ON" : "OFF"}
-                  </span>
-                </label>
-                {/* 4分/8分 */}
-                <div style={{ display: "flex", gap: 6 }}>
-                  {([4, 8] as const).map(d => (
-                    <label key={d} style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}>
-                      <input
-                        type="radio"
-                        name="metroDiv"
-                        checked={metroDiv === d}
-                        onChange={() => {
-                          setMetroDiv(d);
-                          metroDivRef.current = d;
-                          metroNextBeatRef.current = null;
-                          localStorage.setItem(METRO_DIV_KEY, String(d));
-                        }}
-                        style={{ accentColor: "#f80" }}
-                      />
-                      <span style={{ fontSize: 11 }}>{d}分</span>
-                    </label>
-                  ))}
+        {/* グリッド + メトロノーム設定 + SCR情報 */}
+        <div className="flex flex-col gap-2 shrink-0">
+        <Card className="h-fit">
+          <CardHeader className="pb-2 pt-3 px-3">
+            <CardTitle className="text-xs text-muted-foreground">グリッド</CardTitle>
+          </CardHeader>
+          <CardContent className="px-3 pb-3 flex flex-col gap-2">
+            <RadioGroup
+              value={gridMode}
+              onValueChange={(v) => {
+                const m = v as GridMode;
+                setGridMode(m); gridModeRef.current = m;
+                localStorage.setItem(GRID_MODE_STORAGE_KEY, m);
+              }}
+              className="flex flex-col gap-1"
+            >
+              {(["time", "bpm", "scr"] as GridMode[]).map(m => (
+                <div key={m} className="flex items-center gap-2">
+                  <RadioGroupItem value={m} id={`grid-${m}`} />
+                  <Label htmlFor={`grid-${m}`} className="text-xs cursor-pointer">
+                    {m === "time" ? "時間" : m === "bpm" ? "BPM" : "SCR基点"}
+                  </Label>
                 </div>
-                {/* 音量 */}
-                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              ))}
+            </RadioGroup>
+
+            {(gridMode === "bpm" || gridMode === "scr") && (
+              <div className="flex flex-col gap-3 mt-1 border-t border-border pt-2">
+                <div className="flex flex-col gap-1">
                   <input
-                    type="range"
-                    min={0} max={1} step={0.05}
-                    value={metroVol}
+                    type="number"
+                    min={1} max={999}
+                    value={bpm}
                     onChange={e => {
-                      const v = Number(e.target.value);
-                      setMetroVol(v);
-                      metroVolRef.current = v;
-                      localStorage.setItem(METRO_VOL_KEY, String(v));
+                      const v = Math.max(1, Math.min(999, Number(e.target.value)));
+                      setBpm(v); bpmRef.current = v;
+                      metroNextBeatRef.current = null;
+                      localStorage.setItem(BPM_STORAGE_KEY, String(v));
                     }}
-                    style={{ width: 60, accentColor: "#f80" }}
+                    className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
                   />
-                  <span style={{ color: "#555", fontSize: 10 }}>音量</span>
+                  <span className="text-xs text-muted-foreground">BPM</span>
+                </div>
+
+                {/* メトロノーム */}
+                <div className="flex flex-col gap-2 border-t border-border pt-2">
+                  <span className="text-xs text-muted-foreground">メトロノーム</span>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="metro-on"
+                      checked={metroOn}
+                      onCheckedChange={(checked) => {
+                        const on = !!checked;
+                        setMetroOn(on); metroOnRef.current = on;
+                        metroNextBeatRef.current = null;
+                        localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
+                        if (on && !audioCtxRef.current) audioCtxRef.current = new AudioContext();
+                        if (on && audioCtxRef.current?.state === "suspended") audioCtxRef.current.resume();
+                      }}
+                    />
+                    <Label htmlFor="metro-on" className={`text-xs cursor-pointer ${metroOn ? "text-primary" : "text-muted-foreground"}`}>
+                      {metroOn ? "ON" : "OFF"}
+                    </Label>
+                  </div>
+                  <RadioGroup
+                    value={String(metroDiv)}
+                    onValueChange={(v) => {
+                      const d = Number(v) as 4 | 8;
+                      setMetroDiv(d); metroDivRef.current = d;
+                      metroNextBeatRef.current = null;
+                      localStorage.setItem(METRO_DIV_KEY, v);
+                    }}
+                    className="flex gap-3"
+                  >
+                    {([4, 8] as const).map(d => (
+                      <div key={d} className="flex items-center gap-1">
+                        <RadioGroupItem value={String(d)} id={`metro-${d}`} />
+                        <Label htmlFor={`metro-${d}`} className="text-xs cursor-pointer">{d}分</Label>
+                      </div>
+                    ))}
+                  </RadioGroup>
+                  <div className="flex items-center gap-2">
+                    <Slider
+                      min={0} max={1} step={0.05}
+                      value={[metroVol]}
+                      onValueChange={([v]) => {
+                        setMetroVol(v); metroVolRef.current = v;
+                        localStorage.setItem(METRO_VOL_KEY, String(v));
+                      }}
+                      className="w-20"
+                    />
+                    <span className="text-xs text-muted-foreground">音量</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
-      </div>
+            )}
+          </CardContent>
+        </Card>
 
-      {/* 操作ボタン（常時表示、状態に応じてdisabled） */}
-      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
-        <button
-          onClick={startPlaying}
-          disabled={mode === "live" || mode === "playing"}
-          style={{
-            ...btnBase,
-            background: mode === "paused" ? "#4a4" : "#333",
-            color: mode === "paused" ? "#fff" : "#666",
-          }}
-        >
-          ▶ ここから再生
-        </button>
-        <button
-          onClick={goLive}
-          disabled={mode === "live"}
-          style={{
-            ...btnBase,
-            background: mode !== "live" ? "#f80" : "#333",
-            color: mode !== "live" ? "#111" : "#666",
-          }}
-        >
-          ⏩ ライブに戻る
-        </button>
-        <button
-          onClick={() => setShowConfig(true)}
-          style={{ ...btnBase, background: "#226", color: "#aaf", marginLeft: "auto" }}
-        >
-          ⚙ キーコンフィグ
-        </button>
+        {/* SCR 情報パネル */}
+        <Card className="h-fit min-w-24">
+          <CardHeader className="pb-2 pt-3 px-3">
+            <CardTitle className="text-xs text-muted-foreground">SCR情報</CardTitle>
+          </CardHeader>
+          <CardContent className="px-3 pb-3 flex flex-col gap-2">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] text-muted-foreground">枚数</span>
+              <span className={`text-right text-lg font-bold tabular-nums ${scrInfo.count > 0 ? "text-yellow-300" : "text-muted"}`}>
+                {scrInfo.count > 0 ? scrInfo.count : "—"}
+              </span>
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] text-muted-foreground">間隔</span>
+              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-white" : "text-zinc-400"}`}>
+                {scrInfo.intervalMs !== null ? `${scrInfo.intervalMs}ms` : "—"}
+              </span>
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] text-muted-foreground">音符</span>
+              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-cyan-200" : "text-cyan-700"}`}>
+                {scrInfo.noteDivision ?? "—"}
+              </span>
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] text-muted-foreground">推定BPM</span>
+              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-cyan-300" : "text-cyan-800"}`}>
+                {scrInfo.estimatedBpm ?? "—"}
+              </span>
+            </div>
+            {(gridMode === "bpm" || gridMode === "scr") && (
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[10px] text-muted-foreground">ズレ</span>
+                <span className={`text-right text-sm tabular-nums ${scrActive ? offsetColor : "text-zinc-500"}`}>
+                  {scrInfo.offsetMs !== null
+                    ? `${scrInfo.offsetMs >= 0 ? "+" : ""}${scrInfo.offsetMs}ms`
+                    : "—"}
+                </span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        </div>
       </div>
 
       {channelCount === 0 && (
-        <p style={{ color: "#555", marginTop: 12 }}>入力を待っています…</p>
+        <p className="text-muted-foreground text-sm">入力を待っています…</p>
       )}
 
-      {/* キーコンフィグ モーダル */}
-      {showConfig && (
-        <div
-          onClick={(e) => { if (e.target === e.currentTarget) closeConfig(); }}
-          style={{
-            position: "fixed", inset: 0,
-            background: "rgba(0,0,0,0.75)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            zIndex: 100,
-          }}
-        >
-          <div style={{
-            background: "#1a1a1a",
-            border: "1px solid #444",
-            borderRadius: 8,
-            padding: 24,
-            minWidth: 480,
-            fontFamily: "monospace",
-            color: "#eee",
-          }}>
-            <h3 style={{ margin: "0 0 16px", fontSize: 14, color: "#aaa" }}>
-              キーコンフィグ
-              {assigningTarget && (
-                <span style={{ marginLeft: 12, color: "#f80", fontSize: 12 }}>
-                  [{assigningTarget}] に割り当てる入力を押してください…
+      {/* 棒グラフ (Canvas) */}
+      <Card className="w-fit">
+        <CardHeader className="pb-1 pt-3 px-3">
+          <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
+        </CardHeader>
+        <CardContent className="px-3 pb-3">
+          <div className="relative inline-block">
+            <canvas
+              ref={chartCanvasRef}
+              width={CHART_W}
+              height={CHART_H}
+              className="block"
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const intervals = intervalHistoryRef.current;
+                if (intervals.length === 0) return;
+                const plotW = CHART_W - CHART_PAD_L;
+                const barW = Math.max(2, Math.min(10, Math.floor(plotW / intervals.length)));
+                const barIdx = Math.floor((x - CHART_PAD_L) / barW);
+                if (barIdx >= 0 && barIdx < intervals.length) {
+                  const entry = intervals[barIdx];
+                  const barCenterX = CHART_PAD_L + barIdx * barW + barW / 2;
+                  setChartTooltip({ x: barCenterX, y: e.clientY - rect.top - 8, entry });
+                } else {
+                  setChartTooltip(null);
+                }
+              }}
+              onMouseLeave={() => setChartTooltip(null)}
+            />
+            {chartTooltip && (
+              <div
+                className="pointer-events-none absolute z-10 border border-zinc-600 rounded px-2 py-1 text-xs whitespace-nowrap -translate-x-1/2"
+                style={{ left: chartTooltip.x, top: chartTooltip.y - 36, background: "rgba(20,20,20,0.95)" }}
+              >
+                <span style={{ color: chartTooltip.entry.dir > 0 ? "#4f8" : "#fa4" }}>
+                  {chartTooltip.entry.dir > 0 ? "↻" : "↺"}
                 </span>
-              )}
-            </h3>
-
-            {/* コントローラー配置 */}
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-
-              {/* スクラッチ円 */}
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                <span style={{ fontSize: 10, color: "#666" }}>SCR</span>
-                <div style={{
-                  width: 130, height: 130,
-                  borderRadius: "50%",
-                  overflow: "hidden",
-                  border: "2px solid #444",
-                  display: "flex",
-                  flexShrink: 0,
-                }}>
-                  {/* 左半分: SCR_NEG (反時計回り) */}
-                  <div
-                    onClick={() => startAssigning("SCR_NEG")}
-                    onContextMenu={(e) => { e.preventDefault(); clearBinding("SCR_NEG"); }}
-                    style={{
-                      ...assignBtnStyle("SCR_NEG"),
-                      width: "50%", height: "100%",
-                      borderRadius: 0,
-                      borderRight: "1px solid #555",
-                    }}
-                    title="左クリック: 割り当て  右クリック: クリア"
-                  >
-                    <span style={{ fontSize: 16 }}>↺</span>
-                    <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2 }}>
-                      {bindingLabel(keyConfig["SCR_NEG"])}
-                    </span>
-                  </div>
-                  {/* 右半分: SCR_POS (時計回り) */}
-                  <div
-                    onClick={() => startAssigning("SCR_POS")}
-                    onContextMenu={(e) => { e.preventDefault(); clearBinding("SCR_POS"); }}
-                    style={{
-                      ...assignBtnStyle("SCR_POS"),
-                      width: "50%", height: "100%",
-                      borderRadius: 0,
-                    }}
-                    title="左クリック: 割り当て  右クリック: クリア"
-                  >
-                    <span style={{ fontSize: 16 }}>↻</span>
-                    <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2 }}>
-                      {bindingLabel(keyConfig["SCR_POS"])}
-                    </span>
-                  </div>
-                </div>
+                <span className="ml-1 text-foreground">{chartTooltip.entry.ms}ms</span>
+                {bpm > 0 && (
+                  <span className="ml-2 text-cyan-300">
+                    {nearestNoteDivision(chartTooltip.entry.ms, bpm)}
+                  </span>
+                )}
               </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
-              {/* 鍵盤 KEY1〜KEY7: 偶数(黒鍵)を上段、奇数(白鍵)を下段に2段配置 */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                {/* 上段: 偶数キー(2/4/6) */}
-                <div style={{ display: "flex", gap: 2, justifyContent: "center" }}>
-                  {KEY_DEFS.filter(k => k.black).map(({ id, label }) => (
+      {/* キーコンフィグ ダイアログ */}
+      <Dialog open={showConfig} onOpenChange={(open) => { if (!open) closeConfig(); }}>
+        <DialogContent className="bg-zinc-900 border-border min-w-[480px] font-mono opacity-100">
+          <DialogHeader>
+            <DialogTitle className="text-lg text-muted-foreground">
+              Key Config
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="flex items-center gap-3 mt-2 justify-center">
+            {/* スクラッチ円 */}
+            <div className="flex flex-col items-center gap-1">
+              <div className="w-[164px] h-[164px] rounded-full overflow-hidden border-2 border-border flex shrink-0">
+                {(["SCR_NEG", "SCR_POS"] as const).map((target, idx) => {
+                  const isAssigning = assigningTarget === target;
+                  const hasBinding  = !!keyConfig[target];
+                  return (
                     <div
-                      key={id}
-                      onClick={() => startAssigning(id)}
-                      onContextMenu={(e) => { e.preventDefault(); clearBinding(id); }}
-                      style={{ ...assignBtnStyle(id), width: 44, height: 60, borderRadius: 4 }}
+                      key={target}
+                      onClick={() => startAssigning(target)}
+                      onContextMenu={(e) => { e.preventDefault(); clearBinding(target); }}
+                      className={[
+                        "flex flex-col items-center justify-center gap-0.5 w-1/2 h-full cursor-pointer select-none text-sm text-center",
+                        idx === 0 ? "border-r border-border" : "",
+                        isAssigning ? "bg-amber-950 text-primary"
+                          : hasBinding ? "bg-green-950 text-green-400"
+                          : "bg-card text-muted-foreground hover:bg-secondary",
+                      ].join(" ")}
                       title="左クリック: 割り当て  右クリック: クリア"
                     >
-                      <span style={{ fontSize: 11, fontWeight: "bold" }}>{label}</span>
-                      <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {bindingLabel(keyConfig[id])}
-                      </span>
+                      <span className="text-2xl leading-none">{target === "SCR_NEG" ? "↶" : "↷"}</span>
+                      <span className="break-all w-full text-center px-1 leading-tight min-h-[2.5rem]">{bindingLabel(keyConfig[target])}</span>
                     </div>
-                  ))}
-                </div>
-                {/* 下段: 奇数キー(1/3/5/7) */}
-                <div style={{ display: "flex", gap: 2 }}>
-                  {KEY_DEFS.filter(k => !k.black).map(({ id, label }) => (
-                    <div
-                      key={id}
-                      onClick={() => startAssigning(id)}
-                      onContextMenu={(e) => { e.preventDefault(); clearBinding(id); }}
-                      style={{ ...assignBtnStyle(id), width: 44, height: 60, borderRadius: 4 }}
-                      title="左クリック: 割り当て  右クリック: クリア"
-                    >
-                      <span style={{ fontSize: 11, fontWeight: "bold" }}>{label}</span>
-                      <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {bindingLabel(keyConfig[id])}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
             </div>
 
-            <p style={{ fontSize: 10, color: "#555", margin: "12px 0 16px" }}>
-              左クリック: 入力待ち &nbsp;|&nbsp; 右クリック: 割り当てクリア
-            </p>
-
-            {/* フッターボタン */}
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button
-                onClick={clearAll}
-                style={{ ...btnBase, background: "#400", color: "#f88", fontSize: 12 }}
-              >
-                全クリア
-              </button>
-              <button
-                onClick={closeConfig}
-                style={{ ...btnBase, background: "#333", color: "#ccc", fontSize: 12 }}
-              >
-                閉じる
-              </button>
+            {/* 鍵盤 */}
+            <div className="flex flex-col gap-1">
+              <div className="flex gap-1 justify-center">
+                {KEY_DEFS.filter(k => k.black).map(({ id, label }) => {
+                  const isAssigning = assigningTarget === id;
+                  const hasBinding  = !!keyConfig[id];
+                  return (
+                    <div
+                      key={id}
+                      onClick={() => startAssigning(id)}
+                      onContextMenu={(e) => { e.preventDefault(); clearBinding(id); }}
+                      className={[
+                        "w-14 h-20 rounded flex flex-col items-center justify-center gap-0.5 cursor-pointer select-none text-sm",
+                        isAssigning ? "bg-amber-950 border-2 border-primary text-primary"
+                          : hasBinding ? "bg-green-950 border border-green-700 text-green-400"
+                          : "bg-secondary border border-border text-muted-foreground hover:bg-accent",
+                      ].join(" ")}
+                      title="左クリック: 割り当て  右クリック: クリア"
+                    >
+                      <span className="font-bold text-base">{label}</span>
+                      <span className="break-all text-center px-0.5 leading-tight min-h-[2.5rem]">{bindingLabel(keyConfig[id])}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex gap-1">
+                {KEY_DEFS.filter(k => !k.black).map(({ id, label }) => {
+                  const isAssigning = assigningTarget === id;
+                  const hasBinding  = !!keyConfig[id];
+                  return (
+                    <div
+                      key={id}
+                      onClick={() => startAssigning(id)}
+                      onContextMenu={(e) => { e.preventDefault(); clearBinding(id); }}
+                      className={[
+                        "w-14 h-20 rounded flex flex-col items-center justify-center gap-0.5 cursor-pointer select-none text-sm",
+                        isAssigning ? "bg-amber-950 border-2 border-primary text-primary"
+                          : hasBinding ? "bg-green-950 border border-green-700 text-green-400"
+                          : "bg-secondary border border-border text-muted-foreground hover:bg-accent",
+                      ].join(" ")}
+                      title="左クリック: 割り当て  右クリック: クリア"
+                    >
+                      <span className="font-bold text-base">{label}</span>
+                      <span className="break-all text-center px-0.5 leading-tight min-h-[2.5rem]">{bindingLabel(keyConfig[id])}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </main>
+
+          <p className="text-sm text-muted-foreground mt-1 text-center">
+            左クリック: 入力待ち &nbsp;|&nbsp; 右クリック: 割り当てクリア
+          </p>
+
+          <div className="flex justify-between mt-1">
+            <Button variant="secondary" size="sm" onClick={clearAll}>全クリア</Button>
+            <Button variant="outline" size="sm" onClick={closeConfig}>閉じる</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
