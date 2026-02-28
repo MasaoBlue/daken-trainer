@@ -35,7 +35,7 @@ interface Channel {
 
 // ---- 定数 ------------------------------------------------------------------
 
-const CANVAS_H          = 800;
+const CANVAS_H          = 700;
 const HEADER_H          = 40;
 const TIME_WINDOW       = 3000;   // ms: 表示する時間幅
 const AXIS_TIMEOUT      = 150;    // ms: axis 停止判定
@@ -170,37 +170,56 @@ function drawTimeline(
 
     // スパン描画
     const pad = Math.max(2, Math.floor(lane.w * 0.06));
+    const TICK_H = 5; // 押し始め・押し終わりのマーカー高さ(px)
+
     for (const span of ch.spans) {
-      // アクティブスパン(end===null)の上端:
-      //   ライブ中 → realNowMs（常に上端に張り付く）
-      //   スクロール中 → viewNowMs（画面の現在時刻まで）
       const activeEnd = isLive ? realNowMs : viewNowMs;
       const yTop    = span.end !== null ? tToY(span.end) : tToY(activeEnd);
       const yBottom = tToY(span.start);
 
-      // 完全に画面外はスキップ
       if (yTop > BODY_BOTTOM || yBottom < HEADER_H) continue;
 
-      // 画面内にクリップ
       const drawTop    = Math.max(yTop,    HEADER_H);
       const drawBottom = Math.min(yBottom, BODY_BOTTOM);
-      const h          = Math.max(drawBottom - drawTop, 3);
 
-      if (ch.kind === "button") {
-        ctx.fillStyle = lane.noteColor;
-      } else {
-        const dir = (span.direction ?? 1) > 0;
-        ctx.fillStyle = dir
+      // メインカラー決定
+      const color = ch.kind === "button"
+        ? lane.noteColor
+        : ((span.direction ?? 1) > 0
           ? (lane.axisColorPos ?? lane.noteColor)
-          : (lane.axisColorNeg ?? lane.noteColor);
+          : (lane.axisColorNeg ?? lane.noteColor));
+
+      const lx = x + pad;
+      const lw = lane.w - pad * 2;
+
+      // --- 1. 押しっぱなし中の胴体部分（左右1px短く、半透明）---
+      const bodyTop    = Math.max(drawTop,    HEADER_H);
+      const bodyBottom = Math.min(drawBottom - TICK_H, BODY_BOTTOM); // 押し始めマーカー分を除く
+      if (bodyBottom > bodyTop) {
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = color;
+        ctx.fillRect(lx + 1, bodyTop, lw - 2, bodyBottom - bodyTop);
+        ctx.globalAlpha = 1.0;
       }
 
-      ctx.fillRect(x + pad, drawTop, lane.w - pad * 2, h);
+      // --- 2. 押し始めマーカー（下端 TICK_H px、フル色）---
+      const startMarkerBottom = Math.min(drawBottom, BODY_BOTTOM);
+      const startMarkerTop    = Math.max(startMarkerBottom - TICK_H, HEADER_H);
+      if (startMarkerBottom > startMarkerTop) {
+        ctx.fillStyle = color;
+        ctx.fillRect(lx, startMarkerTop, lw, startMarkerBottom - startMarkerTop);
+      }
 
-      if (span.end === null && isLive) {
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x + pad, drawTop, lane.w - pad * 2, h);
+      // --- 3. 押し終わりマーカー（上端 3px、胴体と同幅、中間の濃さ）--- 終了済みスパンのみ
+      if (span.end !== null) {
+        const endMarkerTop    = Math.max(drawTop, HEADER_H);
+        const endMarkerBottom = Math.min(drawTop + 3, BODY_BOTTOM);
+        if (endMarkerBottom > endMarkerTop) {
+          ctx.globalAlpha = 0.35;
+          ctx.fillStyle = color;
+          ctx.fillRect(lx + 1, endMarkerTop, lw - 2, endMarkerBottom - endMarkerTop);
+          ctx.globalAlpha = 1.0;
+        }
       }
     }
   }
