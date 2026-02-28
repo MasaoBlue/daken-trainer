@@ -47,7 +47,7 @@ interface Channel {
 const CANVAS_H          = 600;
 const HEADER_H          = 40;
 const GREEN_NUM_STORAGE_KEY = "scratch-trainer-green-num";
-const GREEN_NUM_DEFAULT     = 600;
+const GREEN_NUM_DEFAULT     = 1000;
 const AXIS_TIMEOUT      = 150;
 const SCR_RESET_MS      = 500;
 const SPAN_RETAIN       = 600000;
@@ -366,6 +366,7 @@ function drawBarChart(
   // バー描画（左から並べる、最新が右端）
   // 棒の色: 縦方向グラデーション（上=32分色(赤), 下=4分色(グレー)）+ 下端に方向インジケータ
   const DIR_INDICATOR_H = Math.max(1, Math.floor(barW * 0.4)); // 上端の方向色の高さ
+  // 左詰めで配置（右端は固定幅内に収まる）
   for (let i = 0; i < count; i++) {
     const { ms, dir } = intervals[i];
     const x = plotX + i * barW;
@@ -381,36 +382,39 @@ function drawBarChart(
     const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
     grad.addColorStop(0, NOTE_COLOR(barDiv)); // 上端(バー先端)=そのmsの色
     grad.addColorStop(1, NOTE_COLOR(4));      // 下端=4分=グレー
-    // 上端: 方向インジケータ（↻=#4f8, ↺=#fa4）
     const dirColor = dir > 0 ? "#4f8" : "#fa4";
-    const bx = x, bw = barW - 1; // 右に1px隙間を空けてバー同士を分離
-    ctx.fillStyle = dirColor;
-    ctx.fillRect(bx, yTop, bw, DIR_INDICATOR_H);
 
+    const bx = x, bw = barW - 1;
     if (i === 0) {
-      // 最初の1本目は単色
+      // 1本目: 縦幅100%・軸線
       ctx.fillStyle = dirColor;
+      ctx.globalAlpha = 0.6;
+      ctx.fillRect(bx, PAD_T, bw, plotH);
+      ctx.globalAlpha = 1.0;
     } else {
+      // 上端: 方向インジケータ
+      ctx.fillStyle = dirColor;
+      ctx.fillRect(bx, yTop, bw, DIR_INDICATOR_H);
       ctx.fillStyle = grad;
+      ctx.fillRect(bx, yTop + DIR_INDICATOR_H, bw, barH - DIR_INDICATOR_H);
     }
-    ctx.fillRect(bx, yTop + DIR_INDICATOR_H, bw, barH - DIR_INDICATOR_H);
   }
 
-  // X軸ラベル（枚数: 1, 10, 20...）
+  // X軸ラベル（枚数）: 100以下は1,10,20...50、100超えは50単位
   ctx.fillStyle = "#666";
   ctx.font = "9px monospace";
-  ctx.textAlign = "left";
-  const tickIntervals = [1, 10, 20, 30, 40, 50];
-  for (const n of tickIntervals) {
+  ctx.textAlign = "center";
+  const tickStep = count > 100 ? 50 : 10;
+  const tickList = [1];
+  for (let n = tickStep; n <= count; n += tickStep) tickList.push(n);
+  for (const n of tickList) {
     if (n > count) break;
-    const idx = n - 1; // 0-based
+    const idx = n - 1;
     const x = plotX + idx * barW + barW / 2;
-    // 目盛り線
     ctx.strokeStyle = "#444";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, PAD_T + plotH); ctx.lineTo(x, PAD_T + plotH + 3); ctx.stroke();
-    // ラベル
-    ctx.fillText(String(n), x - (n >= 10 ? 5 : 2), h - 2);
+    ctx.fillText(String(n), x, h - 2);
   }
 }
 
@@ -474,15 +478,15 @@ export default function App() {
   // 緑数字
   const [greenNum, setGreenNum] = useState(() => {
     const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
-    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(999, v));
+    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v));
   });
   const greenNumRef = useRef((() => {
     const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
-    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(999, v));
+    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v));
   })());
   const [greenNumText, setGreenNumText] = useState(() => {
     const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
-    return String(isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(999, v)));
+    return String(isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v)));
   });
 
   // メトロノーム
@@ -539,7 +543,7 @@ export default function App() {
   const intervalHistoryRef = useRef<IntervalEntry[]>([]);
   const chartCanvasRef = useRef<HTMLCanvasElement>(null);
   const chartCtxRef    = useRef<CanvasRenderingContext2D | null>(null);
-  const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry } | null>(null);
+  const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry; idx: number } | null>(null);
 
   // キーコンフィグ
   const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
@@ -713,9 +717,8 @@ export default function App() {
       const LOOKAHEAD_MS = 120;
       if (metroOnRef.current && audioCtxRef.current) {
         const ac = audioCtxRef.current;
-        const gm = gridModeRef.current;
         const bpmVal = bpmRef.current;
-        if ((gm === "bpm" || gm === "scr") && bpmVal > 0) {
+        if (bpmVal > 0) {
           const origin = 0;
           const beatMs = 60000 / bpmVal;
           const subDiv = metroDivRef.current;
@@ -763,7 +766,6 @@ export default function App() {
         scrPrevDirTimeRef.current = null;
         scrIntervalHistRef.current = [];
         setScrCount(0);
-        setScrInfo(prev => ({ ...prev, count: 0 })); // 値は保持、枚数だけリセット
         setScrActive(false);
       }
 
@@ -990,29 +992,29 @@ export default function App() {
             </RadioGroup>
 
             {/* 緑数字 */}
-            <div className="flex items-center gap-2 border-t border-border pt-2">
+            <div className="flex items-center justify-between border-t border-border pt-2">
+              <span className="text-xs text-muted-foreground">緑数字</span>
               <input
                 type="number"
-                min={100} max={999}
+                min={100} max={3000}
                 value={greenNumText}
                 onChange={e => {
                   setGreenNumText(e.target.value);
                   const v = parseInt(e.target.value);
-                  if (!isNaN(v) && v >= 100 && v <= 999) {
+                  if (!isNaN(v) && v >= 100 && v <= 3000) {
                     setGreenNum(v); greenNumRef.current = v;
                     localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(v));
                   }
                 }}
                 onBlur={e => {
                   const v = parseInt(e.target.value);
-                  const resolved = (!isNaN(v) && v >= 100 && v <= 999) ? v : GREEN_NUM_DEFAULT;
+                  const resolved = (!isNaN(v) && v >= 100 && v <= 3000) ? v : GREEN_NUM_DEFAULT;
                   setGreenNum(resolved); greenNumRef.current = resolved;
                   setGreenNumText(String(resolved));
                   localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(resolved));
                 }}
                 className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
               />
-              <span className="text-xs text-muted-foreground">緑数字</span>
             </div>
 
             <div className="border-t border-border pt-2">
@@ -1037,87 +1039,84 @@ export default function App() {
               ))}
             </RadioGroup>
 
-            {(gridMode === "bpm" || gridMode === "scr") && (
-              <div className="flex flex-col gap-3 mt-1 border-t border-border pt-2">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1} max={999}
-                    value={bpmText}
-                    onChange={e => {
-                      setBpmText(e.target.value);
-                      const v = parseInt(e.target.value);
-                      if (!isNaN(v) && v >= 1 && v <= 999) {
-                        setBpm(v); bpmRef.current = v;
-                        metroNextBeatRef.current = null;
-                        localStorage.setItem(BPM_STORAGE_KEY, String(v));
-                      }
-                    }}
-                    onBlur={e => {
-                      const v = parseInt(e.target.value);
-                      const resolved = (!isNaN(v) && v >= 1 && v <= 999) ? v : 150;
-                      setBpm(resolved); bpmRef.current = resolved;
-                      setBpmText(String(resolved));
-                      metroNextBeatRef.current = null;
-                      localStorage.setItem(BPM_STORAGE_KEY, String(resolved));
-                    }}
-                    className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
-                  />
-                  <span className="text-xs text-muted-foreground">BPM</span>
-                </div>
+            {/* BPM（常時表示） */}
+            <div className="flex items-center justify-between border-t border-border pt-2">
+              <span className="text-xs text-muted-foreground">BPM</span>
+              <input
+                type="number"
+                min={1} max={999}
+                value={bpmText}
+                onChange={e => {
+                  setBpmText(e.target.value);
+                  const v = parseInt(e.target.value);
+                  if (!isNaN(v) && v >= 1 && v <= 999) {
+                    setBpm(v); bpmRef.current = v;
+                    metroNextBeatRef.current = null;
+                    localStorage.setItem(BPM_STORAGE_KEY, String(v));
+                  }
+                }}
+                onBlur={e => {
+                  const v = parseInt(e.target.value);
+                  const resolved = (!isNaN(v) && v >= 1 && v <= 999) ? v : 150;
+                  setBpm(resolved); bpmRef.current = resolved;
+                  setBpmText(String(resolved));
+                  metroNextBeatRef.current = null;
+                  localStorage.setItem(BPM_STORAGE_KEY, String(resolved));
+                }}
+                className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
+              />
+            </div>
 
-                {/* メトロノーム */}
-                <div className="flex flex-col gap-2 border-t border-border pt-2">
-                  <span className="text-xs text-muted-foreground">メトロノーム</span>
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="metro-on"
-                      checked={metroOn}
-                      onCheckedChange={(checked) => {
-                        const on = !!checked;
-                        setMetroOn(on); metroOnRef.current = on;
-                        metroNextBeatRef.current = null;
-                        localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
-                        if (on && !audioCtxRef.current) audioCtxRef.current = new AudioContext();
-                        if (on && audioCtxRef.current?.state === "suspended") audioCtxRef.current.resume();
-                      }}
-                    />
-                    <Label htmlFor="metro-on" className={`text-xs cursor-pointer ${metroOn ? "text-primary" : "text-muted-foreground"}`}>
-                      {metroOn ? "ON" : "OFF"}
-                    </Label>
-                  </div>
-                  <RadioGroup
-                    value={String(metroDiv)}
-                    onValueChange={(v) => {
-                      const d = Number(v) as 4 | 8;
-                      setMetroDiv(d); metroDivRef.current = d;
-                      metroNextBeatRef.current = null;
-                      localStorage.setItem(METRO_DIV_KEY, v);
-                    }}
-                    className="flex gap-3"
-                  >
-                    {([4, 8] as const).map(d => (
-                      <div key={d} className="flex items-center gap-1">
-                        <RadioGroupItem value={String(d)} id={`metro-${d}`} />
-                        <Label htmlFor={`metro-${d}`} className="text-xs cursor-pointer">{d}分</Label>
-                      </div>
-                    ))}
-                  </RadioGroup>
-                  <div className="flex items-center gap-2">
-                    <Slider
-                      min={0} max={1} step={0.05}
-                      value={[metroVol]}
-                      onValueChange={([v]) => {
-                        setMetroVol(v); metroVolRef.current = v;
-                        localStorage.setItem(METRO_VOL_KEY, String(v));
-                      }}
-                      className="w-20"
-                    />
-                    <span className="text-xs text-muted-foreground">音量</span>
-                  </div>
-                </div>
+            {/* メトロノーム */}
+            <div className="flex flex-col gap-2 border-t border-border pt-2">
+              <span className="text-xs text-muted-foreground">メトロノーム</span>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="metro-on"
+                  checked={metroOn}
+                  onCheckedChange={(checked) => {
+                    const on = !!checked;
+                    setMetroOn(on); metroOnRef.current = on;
+                    metroNextBeatRef.current = null;
+                    localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
+                    if (on && !audioCtxRef.current) audioCtxRef.current = new AudioContext();
+                    if (on && audioCtxRef.current?.state === "suspended") audioCtxRef.current.resume();
+                  }}
+                />
+                <Label htmlFor="metro-on" className={`text-xs cursor-pointer ${metroOn ? "text-primary" : "text-muted-foreground"}`}>
+                  {metroOn ? "ON" : "OFF"}
+                </Label>
               </div>
-            )}
+              <RadioGroup
+                value={String(metroDiv)}
+                onValueChange={(v) => {
+                  const d = Number(v) as 4 | 8;
+                  setMetroDiv(d); metroDivRef.current = d;
+                  metroNextBeatRef.current = null;
+                  localStorage.setItem(METRO_DIV_KEY, v);
+                }}
+                className="flex gap-3"
+              >
+                {([4, 8] as const).map(d => (
+                  <div key={d} className="flex items-center gap-1">
+                    <RadioGroupItem value={String(d)} id={`metro-${d}`} />
+                    <Label htmlFor={`metro-${d}`} className="text-xs cursor-pointer">{d}分</Label>
+                  </div>
+                ))}
+              </RadioGroup>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">音量</span>
+                <Slider
+                  min={0} max={1} step={0.05}
+                  value={[metroVol]}
+                  onValueChange={([v]) => {
+                    setMetroVol(v); metroVolRef.current = v;
+                    localStorage.setItem(METRO_VOL_KEY, String(v));
+                  }}
+                  className="w-20"
+                />
+              </div>
+            </div>
           </CardContent>
         </Card>
 
@@ -1174,7 +1173,7 @@ export default function App() {
                 if (barIdx >= 0 && barIdx < intervals.length) {
                   const entry = intervals[barIdx];
                   const barCenterX = CHART_PAD_L + barIdx * barW + barW / 2;
-                  setChartTooltip({ x: barCenterX, y: e.clientY - rect.top - 8, entry });
+                  setChartTooltip({ x: barCenterX, y: e.clientY - rect.top - 8, entry, idx: barIdx + 1 });
                 } else {
                   setChartTooltip(null);
                 }
@@ -1186,8 +1185,9 @@ export default function App() {
                 className="pointer-events-none absolute z-10 border border-zinc-600 rounded px-2 py-1 text-xs whitespace-nowrap -translate-x-1/2"
                 style={{ left: chartTooltip.x, top: chartTooltip.y - 36, background: "rgba(20,20,20,0.95)" }}
               >
-                <span style={{ color: chartTooltip.entry.dir > 0 ? "#4f8" : "#fa4" }}>
-                  {chartTooltip.entry.dir > 0 ? "↻" : "↺"}
+                <span className="text-muted-foreground">#{chartTooltip.idx}</span>
+                <span style={{ color: chartTooltip.entry.dir > 0 ? "#4f8" : "#fa4" }} className="ml-2">
+                  {chartTooltip.entry.dir > 0 ? "↷" : "↶"}
                 </span>
                 <span className="ml-1 text-foreground">{chartTooltip.entry.ms}ms</span>
                 {bpm > 0 && (
