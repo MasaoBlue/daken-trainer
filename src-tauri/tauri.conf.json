@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "scratch-trainer",
-        "width": 800,
-        "height": 600
+        "width": 700,
+        "height": 900
       }
     ],
     "security": {
