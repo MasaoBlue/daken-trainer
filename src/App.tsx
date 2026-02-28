@@ -9,6 +9,16 @@ type InputEvent =
   | { kind: "ButtonUp";   source: string; id: string; t: number }
   | { kind: "AxisMove";   source: string; id: string; direction: number; value: number; t: number };
 
+// キーコンフィグ: 入力ソースとレーンの対応
+interface Binding {
+  source: string;     // "keyboard" | "gamepad"
+  id: string;         // ボタンID or axisID
+  direction?: number; // axisの場合: 1=正方向(時計), -1=負方向(反時計)
+}
+
+// レーンID ("SCR_POS" | "SCR_NEG" | "KEY1"〜"KEY7") → Binding
+type KeyConfig = Record<string, Binding | null>;
+
 interface Span {
   start: number;        // JS 基準ミリ秒 (描画に使う)
   end: number | null;
@@ -26,11 +36,74 @@ interface Channel {
 // ---- 定数 ------------------------------------------------------------------
 
 const CANVAS_H          = 800;
-const COL_W             = 60;
 const HEADER_H          = 40;
 const TIME_WINDOW       = 3000;   // ms: 表示する時間幅
 const AXIS_TIMEOUT      = 150;    // ms: axis 停止判定
 const SPAN_RETAIN       = 60000;  // ms: 過去1分のスパンを保持（スクロール用）
+
+// ---- キーコンフィグ ユーティリティ ----------------------------------------
+
+const STORAGE_KEY = "scratch-trainer-keyconfig";
+
+function loadConfig(): KeyConfig {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"); } catch { return {}; }
+}
+
+function saveConfig(cfg: KeyConfig) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+}
+
+// 入力イベントを keyConfig に照合してレーン情報を返す
+// マッチしない場合は null（無視）
+function resolveChannel(
+  cfg: KeyConfig,
+  ev: InputEvent,
+): { laneId: string; kind: "button" | "axis"; direction?: number } | null {
+  for (const [laneId, binding] of Object.entries(cfg)) {
+    if (!binding) continue;
+    if (binding.source !== ev.source || binding.id !== ev.id) continue;
+    if (ev.kind === "AxisMove" && binding.direction !== undefined && binding.direction !== ev.direction) continue;
+    if (laneId === "SCR_POS") return { laneId: "SCR", kind: "axis", direction:  1 };
+    if (laneId === "SCR_NEG") return { laneId: "SCR", kind: "axis", direction: -1 };
+    return { laneId, kind: "button" };
+  }
+  return null; // 未割り当て → 無視
+}
+
+function bindingLabel(b: Binding | null | undefined): string {
+  if (!b) return "—";
+  const dir = b.direction === 1 ? "+" : b.direction === -1 ? "−" : "";
+  return `${b.id}${dir}`;
+}
+
+// ---- レーンレイアウト定義 --------------------------------------------------
+// IIDX風レイアウト: SCR / 1 / 2 / 3 / 4 / 5 / 6 / 7
+// channel.id がここの id と一致した場合、そのレーン設定を使う。
+// 一致しないチャンネルはデフォルト設定でレーン追加される。
+
+interface LaneDef {
+  id: string;           // チャンネルID（source:id の id 部分）
+  label: string;        // ヘッダ表示名
+  w: number;            // レーン幅(px)
+  // ボタン用オブジェクト色
+  noteColor: string;
+  // axis用オブジェクト色 (正方向 / 負方向)。ボタンの場合は noteColor を使う
+  axisColorPos?: string;
+  axisColorNeg?: string;
+}
+
+// 後で設定画面から変更可能にする想定。現在は定数で管理。
+const LANE_DEFS: LaneDef[] = [
+  { id: "SCR",    label: "SCR", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
+  { id: "KEY1",   label: "1",   w: 52,  noteColor: "#eee" },
+  { id: "KEY2",   label: "2",   w: 40,  noteColor: "#48f" },
+  { id: "KEY3",   label: "3",   w: 52,  noteColor: "#eee" },
+  { id: "KEY4",   label: "4",   w: 40,  noteColor: "#48f" },
+  { id: "KEY5",   label: "5",   w: 52,  noteColor: "#eee" },
+  { id: "KEY6",   label: "6",   w: 40,  noteColor: "#48f" },
+  { id: "KEY7",   label: "7",   w: 52,  noteColor: "#eee" },
+];
+
 
 // ---- Canvas 描画 -----------------------------------------------------------
 
@@ -71,26 +144,32 @@ function drawTimeline(
     ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
   }
 
-  channels.forEach((ch, ci) => {
-    const x = ci * COL_W;
+  // LANE_DEFS 全レーンを常に描画（入力がなくても表示）
+  // チャンネルが存在する場合はスパンも描画する
+  let xOffset = 0;
+  for (const lane of LANE_DEFS) {
+    const x = xOffset;
+    xOffset += lane.w;
 
     // 区切り線
     ctx.strokeStyle = "#333";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x + COL_W, HEADER_H);
-    ctx.lineTo(x + COL_W, CANVAS_H);
+    ctx.moveTo(x + lane.w, HEADER_H);
+    ctx.lineTo(x + lane.w, CANVAS_H);
     ctx.stroke();
 
     // ヘッダ
-    ctx.fillStyle = ch.source === "keyboard" ? "#8ef" : "#fe8";
+    ctx.fillStyle = "#ccc";
     ctx.font = "bold 11px monospace";
-    ctx.fillText(ch.id.slice(0, 7), x + 4, HEADER_H - 8);
-    ctx.fillStyle = "#666";
-    ctx.font = "9px monospace";
-    ctx.fillText(ch.source.slice(0, 3), x + 4, HEADER_H - 18);
+    ctx.fillText(lane.label, x + 4, HEADER_H - 6);
 
-    // スパン
+    // このレーンに対応するチャンネルを検索
+    const ch = channels.find((c) => c.id === lane.id);
+    if (!ch) continue;
+
+    // スパン描画
+    const pad = Math.max(2, Math.floor(lane.w * 0.06));
     for (const span of ch.spans) {
       // アクティブスパン(end===null)の上端:
       //   ライブ中 → realNowMs（常に上端に張り付く）
@@ -107,19 +186,24 @@ function drawTimeline(
       const drawBottom = Math.min(yBottom, BODY_BOTTOM);
       const h          = Math.max(drawBottom - drawTop, 3);
 
-      ctx.fillStyle = ch.kind === "button"
-        ? (ch.source === "keyboard" ? "#4af" : "#fa4")
-        : ((span.direction ?? 1) > 0 ? "#4f8" : "#f84");
+      if (ch.kind === "button") {
+        ctx.fillStyle = lane.noteColor;
+      } else {
+        const dir = (span.direction ?? 1) > 0;
+        ctx.fillStyle = dir
+          ? (lane.axisColorPos ?? lane.noteColor)
+          : (lane.axisColorNeg ?? lane.noteColor);
+      }
 
-      ctx.fillRect(x + 4, drawTop, COL_W - 8, h);
+      ctx.fillRect(x + pad, drawTop, lane.w - pad * 2, h);
 
       if (span.end === null && isLive) {
         ctx.strokeStyle = "#fff";
         ctx.lineWidth = 2;
-        ctx.strokeRect(x + 4, drawTop, COL_W - 8, h);
+        ctx.strokeRect(x + pad, drawTop, lane.w - pad * 2, h);
       }
     }
-  });
+  }
 
   // 現在時刻ライン
   ctx.strokeStyle = isLive ? "#f44" : "#f80";
@@ -153,6 +237,13 @@ export default function App() {
   const [channelCount, setChannelCount] = useState(0);
   const [mode, setMode] = useState<PlaybackMode>("live");
 
+  // キーコンフィグ state（ref も持つ：イベントハンドラ内から最新値参照するため）
+  const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
+  const keyConfigRef = useRef<KeyConfig>(loadConfig());
+  const [showConfig, setShowConfig] = useState(false);
+  const [assigningTarget, setAssigningTarget] = useState<string | null>(null);
+  const assigningRef = useRef<string | null>(null);
+
   // チャンネル取得/作成
   const getOrCreateChannel = useRef((source: string, id: string, kind: "button" | "axis"): Channel => {
     const key = `${source}:${id}`;
@@ -171,29 +262,54 @@ export default function App() {
       const ev = e.payload;
       const nowJs = performance.now() - startRef.current;
 
+      // コンフィグ割り当てモード: ButtonDown か AxisMove だけを受け付ける（ButtonUp は無視）
+      if (assigningRef.current !== null) {
+        if (ev.kind === "ButtonUp") return; // ButtonUp は無視して待ち続ける
+        const target = assigningRef.current;
+        const binding: Binding = ev.kind === "AxisMove"
+          ? { source: ev.source, id: ev.id, direction: ev.direction }
+          : { source: ev.source, id: ev.id };
+        const newCfg = { ...keyConfigRef.current, [target]: binding };
+        keyConfigRef.current = newCfg;
+        setKeyConfig(newCfg);
+        saveConfig(newCfg);
+        assigningRef.current = null;
+        setAssigningTarget(null);
+        return;
+      }
+
+      // 通常モード: resolveChannel でレーンIDを決定（未割り当ては無視）
+      const resolved = resolveChannel(keyConfigRef.current, ev);
+      if (resolved === null) return;
+
       if (ev.kind === "ButtonDown") {
-        const ch = getOrCreateChannel(ev.source, ev.id, "button");
+        const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
         const last = ch.spans.at(-1);
-        if (!last || last.end !== null) {
-          ch.spans.push({ start: nowJs, end: null, rustT: ev.t });
+        if (resolved.kind === "axis" && last && last.end === null && last.direction !== resolved.direction) {
+          // axis チャンネルで方向が変わった場合: 現在のスパンを閉じて新しい方向でスパン開始
+          last.end = nowJs;
+          ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
+        } else if (!last || last.end !== null) {
+          ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
         }
       } else if (ev.kind === "ButtonUp") {
-        const ch = getOrCreateChannel(ev.source, ev.id, "button");
+        const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
         const last = ch.spans.at(-1);
         if (last && last.end === null) {
           const holdMs = last.rustT !== undefined ? ev.t - last.rustT : 0;
           last.end = last.start + holdMs;
         }
       } else if (ev.kind === "AxisMove") {
-        const ch = getOrCreateChannel(ev.source, ev.id, "axis");
-        const key = `${ev.source}:${ev.id}`;
+        const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
+        const key = `${ev.source}:${resolved.laneId}`;
         axisLastRef.current.set(key, nowJs);
         const last = ch.spans.at(-1);
+        const dir = resolved.direction ?? ev.direction;
         if (!last || last.end !== null) {
-          ch.spans.push({ start: nowJs, end: null, direction: ev.direction });
-        } else if (last.direction !== ev.direction) {
+          ch.spans.push({ start: nowJs, end: null, direction: dir });
+        } else if (last.direction !== dir) {
           last.end = nowJs;
-          ch.spans.push({ start: nowJs, end: null, direction: ev.direction });
+          ch.spans.push({ start: nowJs, end: null, direction: dir });
         }
       }
     });
@@ -233,7 +349,6 @@ export default function App() {
         }
       }
 
-      const maxOff = Math.max(0, nowMs - TIME_WINDOW);
 
       // 再生モードに応じて viewNowMs を計算
       const pb = playbackRef.current;
@@ -355,7 +470,8 @@ export default function App() {
     setMode("paused");
   };
 
-  const width = Math.min(Math.max(channelCount * COL_W, 400), 500);
+  // LANE_DEFS 全レーン幅の合計（固定）
+  const width = LANE_DEFS.reduce((s, d) => s + d.w, 0);
 
   const btnBase: React.CSSProperties = {
     padding: "6px 14px",
@@ -365,6 +481,64 @@ export default function App() {
     fontWeight: "bold",
     cursor: "pointer",
   };
+
+  // キーコンフィグ: 割り当てボタンのスタイル
+  const assignBtnStyle = (target: string): React.CSSProperties => {
+    const isAssigning = assigningTarget === target;
+    const hasBinding = !!keyConfig[target];
+    return {
+      border: isAssigning ? "2px solid #f80" : hasBinding ? "2px solid #2a4" : "2px solid #555",
+      background: isAssigning ? "#3a2000" : hasBinding ? "#0a2010" : "#1a1a1a",
+      cursor: "pointer",
+      fontFamily: "monospace",
+      fontSize: 10,
+      color: isAssigning ? "#f80" : hasBinding ? "#4f8" : "#888",
+      display: "flex",
+      flexDirection: "column" as const,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 2,
+      userSelect: "none" as const,
+    };
+  };
+
+  const startAssigning = (target: string) => {
+    assigningRef.current = target;
+    setAssigningTarget(target);
+  };
+
+  const clearBinding = (target: string) => {
+    const newCfg = { ...keyConfigRef.current, [target]: null };
+    keyConfigRef.current = newCfg;
+    setKeyConfig(newCfg);
+    saveConfig(newCfg);
+  };
+
+  const clearAll = () => {
+    const newCfg: KeyConfig = {};
+    keyConfigRef.current = newCfg;
+    setKeyConfig(newCfg);
+    saveConfig(newCfg);
+    assigningRef.current = null;
+    setAssigningTarget(null);
+  };
+
+  const closeConfig = () => {
+    assigningRef.current = null;
+    setAssigningTarget(null);
+    setShowConfig(false);
+  };
+
+  // KEY1〜KEY7のレーン定義（黒鍵/白鍵）
+  const KEY_DEFS = [
+    { id: "KEY1", label: "1", black: false },
+    { id: "KEY2", label: "2", black: true  },
+    { id: "KEY3", label: "3", black: false },
+    { id: "KEY4", label: "4", black: true  },
+    { id: "KEY5", label: "5", black: false },
+    { id: "KEY6", label: "6", black: true  },
+    { id: "KEY7", label: "7", black: false },
+  ];
 
   return (
     <main style={{ background: "#111", minHeight: "100vh", color: "#eee", fontFamily: "monospace", padding: 16 }}>
@@ -399,7 +573,7 @@ export default function App() {
       </div>
 
       {/* 操作ボタン（常時表示、状態に応じてdisabled） */}
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
         <button
           onClick={startPlaying}
           disabled={mode === "live" || mode === "playing"}
@@ -422,10 +596,157 @@ export default function App() {
         >
           ⏩ ライブに戻る
         </button>
+        <button
+          onClick={() => setShowConfig(true)}
+          style={{ ...btnBase, background: "#226", color: "#aaf", marginLeft: "auto" }}
+        >
+          ⚙ キーコンフィグ
+        </button>
       </div>
 
       {channelCount === 0 && (
         <p style={{ color: "#555", marginTop: 12 }}>入力を待っています…</p>
+      )}
+
+      {/* キーコンフィグ モーダル */}
+      {showConfig && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) closeConfig(); }}
+          style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.75)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 100,
+          }}
+        >
+          <div style={{
+            background: "#1a1a1a",
+            border: "1px solid #444",
+            borderRadius: 8,
+            padding: 24,
+            minWidth: 480,
+            fontFamily: "monospace",
+            color: "#eee",
+          }}>
+            <h3 style={{ margin: "0 0 16px", fontSize: 14, color: "#aaa" }}>
+              キーコンフィグ
+              {assigningTarget && (
+                <span style={{ marginLeft: 12, color: "#f80", fontSize: 12 }}>
+                  [{assigningTarget}] に割り当てる入力を押してください…
+                </span>
+              )}
+            </h3>
+
+            {/* コントローラー配置 */}
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+
+              {/* スクラッチ円 */}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: 10, color: "#666" }}>SCR</span>
+                <div style={{
+                  width: 130, height: 130,
+                  borderRadius: "50%",
+                  overflow: "hidden",
+                  border: "2px solid #444",
+                  display: "flex",
+                  flexShrink: 0,
+                }}>
+                  {/* 左半分: SCR_NEG (反時計回り) */}
+                  <div
+                    onClick={() => startAssigning("SCR_NEG")}
+                    onContextMenu={(e) => { e.preventDefault(); clearBinding("SCR_NEG"); }}
+                    style={{
+                      ...assignBtnStyle("SCR_NEG"),
+                      width: "50%", height: "100%",
+                      borderRadius: 0,
+                      borderRight: "1px solid #555",
+                    }}
+                    title="左クリック: 割り当て  右クリック: クリア"
+                  >
+                    <span style={{ fontSize: 16 }}>↺</span>
+                    <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2 }}>
+                      {bindingLabel(keyConfig["SCR_NEG"])}
+                    </span>
+                  </div>
+                  {/* 右半分: SCR_POS (時計回り) */}
+                  <div
+                    onClick={() => startAssigning("SCR_POS")}
+                    onContextMenu={(e) => { e.preventDefault(); clearBinding("SCR_POS"); }}
+                    style={{
+                      ...assignBtnStyle("SCR_POS"),
+                      width: "50%", height: "100%",
+                      borderRadius: 0,
+                    }}
+                    title="左クリック: 割り当て  右クリック: クリア"
+                  >
+                    <span style={{ fontSize: 16 }}>↻</span>
+                    <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2 }}>
+                      {bindingLabel(keyConfig["SCR_POS"])}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* 鍵盤 KEY1〜KEY7: 偶数(黒鍵)を上段、奇数(白鍵)を下段に2段配置 */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {/* 上段: 偶数キー(2/4/6) */}
+                <div style={{ display: "flex", gap: 2, justifyContent: "center" }}>
+                  {KEY_DEFS.filter(k => k.black).map(({ id, label }) => (
+                    <div
+                      key={id}
+                      onClick={() => startAssigning(id)}
+                      onContextMenu={(e) => { e.preventDefault(); clearBinding(id); }}
+                      style={{ ...assignBtnStyle(id), width: 44, height: 60, borderRadius: 4 }}
+                      title="左クリック: 割り当て  右クリック: クリア"
+                    >
+                      <span style={{ fontSize: 11, fontWeight: "bold" }}>{label}</span>
+                      <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {bindingLabel(keyConfig[id])}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {/* 下段: 奇数キー(1/3/5/7) */}
+                <div style={{ display: "flex", gap: 2 }}>
+                  {KEY_DEFS.filter(k => !k.black).map(({ id, label }) => (
+                    <div
+                      key={id}
+                      onClick={() => startAssigning(id)}
+                      onContextMenu={(e) => { e.preventDefault(); clearBinding(id); }}
+                      style={{ ...assignBtnStyle(id), width: 44, height: 60, borderRadius: 4 }}
+                      title="左クリック: 割り当て  右クリック: クリア"
+                    >
+                      <span style={{ fontSize: 11, fontWeight: "bold" }}>{label}</span>
+                      <span style={{ fontSize: 9, textAlign: "center", lineHeight: 1.2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {bindingLabel(keyConfig[id])}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 10, color: "#555", margin: "12px 0 16px" }}>
+              左クリック: 入力待ち &nbsp;|&nbsp; 右クリック: 割り当てクリア
+            </p>
+
+            {/* フッターボタン */}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                onClick={clearAll}
+                style={{ ...btnBase, background: "#400", color: "#f88", fontSize: 12 }}
+              >
+                全クリア
+              </button>
+              <button
+                onClick={closeConfig}
+                style={{ ...btnBase, background: "#333", color: "#ccc", fontSize: 12 }}
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );

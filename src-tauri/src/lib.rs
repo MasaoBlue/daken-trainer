@@ -1,4 +1,4 @@
-use gilrs::{Axis, Button, EventType, Gilrs};
+use gilrs::{Axis, EventType, Gilrs};
 use rodio::{OutputStream, Sink, Source};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -118,23 +118,13 @@ mod raw_keyboard {
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
-    pub fn start(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSender<f32>) {
-        let key_freqs: HashMap<u16, f32> = [
-            (VK_A, 440.0),
-            (VK_Q, 330.0),
-            (VK_W, 550.0),
-        ]
-        .into();
-
+    pub fn start(app: AppHandle, epoch: Instant, _audio_tx: mpsc::SyncSender<f32>) {
         std::thread::spawn(move || unsafe {
             // コールバックをグローバルに設定
             CALLBACK = Some(Box::new(move |vkey: u16, is_down: bool| {
                 let t = epoch.elapsed().as_secs_f64() * 1000.0;
                 let id = vkey_name(vkey);
                 if is_down {
-                    if let Some(&freq) = key_freqs.get(&vkey) {
-                        let _ = audio_tx.try_send(freq);
-                    }
                     let _ = app.emit("input-event", InputEvent::ButtonDown {
                         source: "keyboard".into(), id, t,
                     });
@@ -203,17 +193,6 @@ mod raw_keyboard {
 // ---- ゲームパッドリスナー --------------------------------------------------
 
 fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSender<f32>) {
-    let button_freqs: HashMap<Button, f32> = [
-        (Button::South,        261.6),
-        (Button::East,         293.7),
-        (Button::North,        329.6),
-        (Button::West,         349.2),
-        (Button::LeftTrigger,  392.0),
-        (Button::RightTrigger, 440.0),
-        (Button::Select,       493.9),
-    ]
-    .into();
-
     // axis ごとの前回 value を記録（直前との差分で方向判定）
     let mut prev_axis: HashMap<Axis, f32> = HashMap::new();
 
@@ -227,9 +206,6 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
                 let t = epoch.elapsed().as_secs_f64() * 1000.0;
                 match event {
                     EventType::ButtonPressed(btn, _) => {
-                        if let Some(&freq) = button_freqs.get(&btn) {
-                            let _ = audio_tx.try_send(freq);
-                        }
                         let _ = app.emit("input-event", InputEvent::ButtonDown {
                             source: "gamepad".into(),
                             id: format!("{:?}", btn),
