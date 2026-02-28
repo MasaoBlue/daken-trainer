@@ -1,10 +1,14 @@
 use gilrs::{Axis, EventType, Gilrs};
-use rodio::{OutputStream, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+
+// clap.mp3 をコンパイル時にバイナリ埋め込み
+static CLAP_MP3: &[u8] = include_bytes!("../assets/clap.mp3");
 
 // ---- 音再生 (専用スレッド1本、スレッド増殖なし) ---------------------------
 
@@ -14,17 +18,15 @@ fn spawn_audio_thread() -> mpsc::SyncSender<f32> {
         let Ok((_stream, handle)) = OutputStream::try_default() else {
             return;
         };
-        let Ok(sink) = Sink::try_new(&handle) else {
-            return;
-        };
-        for freq in rx {
-            if sink.len() > 4 {
-                sink.clear();
+        for _freq in rx {
+            let Ok(sink) = Sink::try_new(&handle) else {
+                continue;
+            };
+            // 静的バイト列から毎回デコードして再生（0.3秒で打ち切り）
+            if let Ok(source) = Decoder::new(Cursor::new(CLAP_MP3)) {
+                sink.append(source.take_duration(Duration::from_millis(300)));
+                sink.detach();
             }
-            let source = rodio::source::SineWave::new(freq)
-                .take_duration(Duration::from_millis(200))
-                .amplify(0.4);
-            sink.append(source);
         }
     });
     tx
@@ -193,11 +195,15 @@ mod raw_keyboard {
 // ---- ゲームパッドリスナー --------------------------------------------------
 
 fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSender<f32>) {
-    // axis ごとの前回 value を記録（直前との差分で方向判定）
+    // axis ごとの前回 value と前回 direction を記録
     let mut prev_axis: HashMap<Axis, f32> = HashMap::new();
+    let mut prev_dir_map: HashMap<Axis, i8> = HashMap::new();
 
     std::thread::spawn(move || {
-        let Ok(mut gilrs) = Gilrs::new() else {
+        let Ok(mut gilrs) = gilrs::GilrsBuilder::new()
+            .with_default_filters(false)
+            .build()
+        else {
             eprintln!("gilrs init failed");
             return;
         };
@@ -233,10 +239,16 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
                             raw_delta
                         };
 
-                        // 方向を delta の符号で決める（0 に近い場合は直前の方向を維持）
-                        let direction: i8 = if delta > 0.01 { 1 } else if delta < -0.01 { -1 } else { 0 };
+                        // 方向を delta の符号で決める
+                        let direction: i8 = if delta > 0.005 { 1 } else if delta < -0.005 { -1 } else { 0 };
                         if direction != 0 {
-                            let _ = audio_tx.try_send(if direction > 0 { 600.0 } else { 500.0 });
+                            // 前回の方向と比較して変わった瞬間だけ音を鳴らす
+                            let prev_dir = *prev_dir_map.get(&axis).unwrap_or(&0);
+                            if prev_dir != direction {
+                                let _ = audio_tx.try_send(if direction > 0 { 600.0 } else { 500.0 });
+                            }
+                            prev_dir_map.insert(axis, direction);
+
                             let _ = app.emit("input-event", InputEvent::AxisMove {
                                 source: "gamepad".into(),
                                 id: format!("{:?}", axis),
