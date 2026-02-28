@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "scratch-trainer",
+  "productName": "daken-trainer",
   "version": "0.1.0",
-  "identifier": "com.scratch-trainer.app",
+  "identifier": "com.daken-trainer.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Scratch Trainer",
+        "title": "Daken Trainer",
         "width": 670,
         "height": 980
       }

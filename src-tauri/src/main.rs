@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    scratch_trainer_lib::run()
+    daken_trainer_lib::run()
 }

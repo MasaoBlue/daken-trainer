@@ -1,0 +1,47 @@
+name: Version Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from package.json
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if version tag already exists
+        id: tag_check
+        run: |
+          git fetch --tags
+          if git tag --list | grep -qx "v${{ steps.version.outputs.version }}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fail if version already released
+        if: steps.tag_check.outputs.exists == 'true'
+        run: |
+          echo "::error::Version v${{ steps.version.outputs.version }} has already been released."
+          echo "::error::Please bump the version in package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json before merging."
+          exit 1
+
+      - name: Version is new
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          echo "Version v${{ steps.version.outputs.version }} is new. OK to merge."

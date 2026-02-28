@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from package.json
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: tag_check
+        shell: bash
+        run: |
+          if git tag --list | grep -qx "v${{ steps.version.outputs.version }}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip if already released
+        if: steps.tag_check.outputs.exists == 'true'
+        shell: bash
+        run: |
+          echo "Version v${{ steps.version.outputs.version }} is already released. Skipping."
+
+      - name: Setup Node.js
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+
+      - name: Install Rust stable
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        if: steps.tag_check.outputs.exists == 'false'
+        run: pnpm install
+
+      - name: Build Tauri app
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v${{ steps.version.outputs.version }}
+          releaseName: v${{ steps.version.outputs.version }}
+          releaseBody: |
+            ## What's Changed
+
+            See the [commit history](https://github.com/${{ github.repository }}/commits/main) for details.
+          releaseDraft: false
+          prerelease: false
+          includeDebug: false

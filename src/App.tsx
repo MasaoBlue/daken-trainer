@@ -46,7 +46,7 @@ interface Channel {
 
 const CANVAS_H          = 600;
 const HEADER_H          = 40;
-const GREEN_NUM_STORAGE_KEY = "scratch-trainer-green-num";
+const GREEN_NUM_STORAGE_KEY = "daken-trainer-green-num";
 const GREEN_NUM_DEFAULT     = 1000;
 const AXIS_TIMEOUT      = 150;
 const SCR_RESET_MS      = 500;
@@ -57,14 +57,14 @@ const CHART_H           = 160; // 棒グラフ固定高さ (px)
 
 // ---- ストレージキー ---------------------------------------------------------
 
-const STORAGE_KEY            = "scratch-trainer-keyconfig";
-const BPM_STORAGE_KEY        = "scratch-trainer-bpm";
-const SCR_ORIGIN_STORAGE_KEY = "scratch-trainer-scr-origin";
-const GRID_MODE_STORAGE_KEY  = "scratch-trainer-grid-mode";
-const METRO_ON_KEY           = "scratch-trainer-metro-on";
-const METRO_DIV_KEY          = "scratch-trainer-metro-div";
-const METRO_VOL_KEY          = "scratch-trainer-metro-vol";
-const SIDE_KEY               = "scratch-trainer-side";
+const STORAGE_KEY            = "daken-trainer-keyconfig";
+const BPM_STORAGE_KEY        = "daken-trainer-bpm";
+const SCR_ORIGIN_STORAGE_KEY = "daken-trainer-scr-origin";
+const GRID_MODE_STORAGE_KEY  = "daken-trainer-grid-mode";
+const METRO_ON_KEY           = "daken-trainer-metro-on";
+const METRO_DIV_KEY          = "daken-trainer-metro-div";
+const METRO_VOL_KEY          = "daken-trainer-metro-vol";
+const SIDE_KEY               = "daken-trainer-side";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
 
