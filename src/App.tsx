@@ -40,7 +40,7 @@ const HEADER_H          = 40;
 const TIME_WINDOW       = 3000;   // ms: 表示する時間幅
 const AXIS_TIMEOUT      = 150;    // ms: axis 停止判定
 const SCR_RESET_MS      = 500;    // ms: スクラッチ連続カウントリセットまでの無入力時間
-const SPAN_RETAIN       = 60000;  // ms: 過去1分のスパンを保持（スクロール用）
+const SPAN_RETAIN       = 600000; // ms: 過去10分のスパンを保持（スクロール用）
 
 // ---- キーコンフィグ ユーティリティ ----------------------------------------
 
