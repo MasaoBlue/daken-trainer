@@ -39,11 +39,15 @@ const CANVAS_H          = 700;
 const HEADER_H          = 40;
 const TIME_WINDOW       = 3000;   // ms: 表示する時間幅
 const AXIS_TIMEOUT      = 150;    // ms: axis 停止判定
+const SCR_RESET_MS      = 500;    // ms: スクラッチ連続カウントリセットまでの無入力時間
 const SPAN_RETAIN       = 60000;  // ms: 過去1分のスパンを保持（スクロール用）
 
 // ---- キーコンフィグ ユーティリティ ----------------------------------------
 
-const STORAGE_KEY = "scratch-trainer-keyconfig";
+const STORAGE_KEY            = "scratch-trainer-keyconfig";
+const BPM_STORAGE_KEY        = "scratch-trainer-bpm";
+const SCR_ORIGIN_STORAGE_KEY = "scratch-trainer-scr-origin";
+const GRID_MODE_STORAGE_KEY  = "scratch-trainer-grid-mode";
 
 function loadConfig(): KeyConfig {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"); } catch { return {}; }
@@ -107,13 +111,19 @@ const LANE_DEFS: LaneDef[] = [
 
 // ---- Canvas 描画 -----------------------------------------------------------
 
+type GridMode = "time" | "bpm" | "scr";
+
 function drawTimeline(
   ctx: CanvasRenderingContext2D,
   channels: Channel[],
-  viewNowMs: number,   // 描画の「現在」（スクロール中は過去の時刻）
-  realNowMs: number,   // 実際の現在時刻（アクティブスパンの上端計算に使う）
+  viewNowMs: number,       // 描画の「現在」（スクロール中は過去の時刻）
+  realNowMs: number,       // 実際の現在時刻（アクティブスパンの上端計算に使う）
   isLive: boolean,
   width: number,
+  scrCount: number,
+  gridMode: GridMode,
+  bpm: number,
+  scrLastOriginMs: number, // scrモード用: 最後のrunのカウント開始時刻（入力が途切れても保持）
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
 
@@ -127,21 +137,70 @@ function drawTimeline(
   const msPerPx = TIME_WINDOW / (BODY_BOTTOM - HEADER_H);
   const tToY = (t: number) => HEADER_H + (viewNowMs - t) / msPerPx;
 
-  // 時間グリッド (500ms ごと)
-  ctx.strokeStyle = "#333";
+  // グリッド描画
+  ctx.strokeStyle = "#484848";
   ctx.lineWidth = 1;
-  const gridStep = 500;
-  const firstGrid = Math.ceil((viewNowMs - TIME_WINDOW) / gridStep) * gridStep;
-  for (let g = firstGrid; g <= viewNowMs; g += gridStep) {
-    const y = tToY(g);
-    if (y < HEADER_H || y > BODY_BOTTOM) continue;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
-    ctx.fillStyle = "#555";
-    ctx.font = "10px monospace";
-    ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
+  if (gridMode === "time") {
+    // 時間グリッド (500ms ごと)
+    const gridStep = 500;
+    const firstGrid = Math.ceil((viewNowMs - TIME_WINDOW) / gridStep) * gridStep;
+    for (let g = firstGrid; g <= viewNowMs; g += gridStep) {
+      const y = tToY(g);
+      if (y < HEADER_H || y > BODY_BOTTOM) continue;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+      ctx.fillStyle = "#777";
+      ctx.font = "10px monospace";
+      ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
+    }
+  } else if (gridMode === "bpm") {
+    // BPMグリッド: 起動時刻基点、4分音符間隔
+    const beatMs = 60000 / bpm;
+    const firstBeat = Math.ceil((viewNowMs - TIME_WINDOW) / beatMs) * beatMs;
+    let beatIdx = Math.round(firstBeat / beatMs);
+    for (let g = firstBeat; g <= viewNowMs; g += beatMs, beatIdx++) {
+      const y = tToY(g);
+      if (y < HEADER_H || y > BODY_BOTTOM) continue;
+      const isMeasure = beatIdx % 4 === 0;
+      ctx.strokeStyle = isMeasure ? "#777" : "#484848";
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+      if (isMeasure) {
+        ctx.fillStyle = "#999";
+        ctx.font = "10px monospace";
+        ctx.fillText(`${Math.round(beatIdx / 4 + 1)}`, 2, y - 2);
+      }
+    }
+  } else if (gridMode === "scr" && isFinite(scrLastOriginMs)) {
+    // SCR基点BPMグリッド
+    // - originより前は描画しない
+    // - 入力が途切れても最後のrunの基点からのグリッドは残す
+    const origin = scrLastOriginMs;
+    const beatMs = 60000 / bpm;
+    const rangeStart = viewNowMs - TIME_WINDOW;
+    const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
+    for (let i = firstBeatOffset; ; i++) {
+      const g = origin + i * beatMs;
+      if (g > viewNowMs) break;
+      if (g < origin) continue; // origin より前は表示しない（i < 0 の拍）
+      const y = tToY(g);
+      if (y < HEADER_H || y > BODY_BOTTOM) continue;
+      const isMeasure = i % 4 === 0;
+      ctx.strokeStyle = isMeasure ? "#779" : "#446";
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+      if (isMeasure) {
+        ctx.fillStyle = "#99b";
+        ctx.font = "10px monospace";
+        ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
+      }
+    }
   }
 
   // LANE_DEFS 全レーンを常に描画（入力がなくても表示）
@@ -163,6 +222,14 @@ function drawTimeline(
     ctx.fillStyle = "#ccc";
     ctx.font = "bold 11px monospace";
     ctx.fillText(lane.label, x + 4, HEADER_H - 6);
+
+    // SCR レーンのみ: 連続スクラッチ枚数をヘッダに表示
+    if (lane.id === "SCR" && scrCount > 0) {
+      ctx.fillStyle = "#ff0";
+      ctx.font = "bold 14px monospace";
+      const label = String(scrCount);
+      ctx.fillText(label, x + lane.w / 2 - (label.length * 4), HEADER_H - 6);
+    }
 
     // このレーンに対応するチャンネルを検索
     const ch = channels.find((c) => c.id === lane.id);
@@ -215,7 +282,7 @@ function drawTimeline(
         const endMarkerTop    = Math.max(drawTop, HEADER_H);
         const endMarkerBottom = Math.min(drawTop + 3, BODY_BOTTOM);
         if (endMarkerBottom > endMarkerTop) {
-          ctx.globalAlpha = 0.35;
+          ctx.globalAlpha = 0.2;
           ctx.fillStyle = color;
           ctx.fillRect(lx + 1, endMarkerTop, lw - 2, endMarkerBottom - endMarkerTop);
           ctx.globalAlpha = 1.0;
@@ -255,6 +322,38 @@ export default function App() {
 
   const [channelCount, setChannelCount] = useState(0);
   const [mode, setMode] = useState<PlaybackMode>("live");
+
+  // グリッド設定
+  const [gridMode, setGridMode] = useState<GridMode>(() => {
+    const v = localStorage.getItem(GRID_MODE_STORAGE_KEY);
+    return (v === "bpm" || v === "scr") ? v : "time";
+  });
+  const gridModeRef = useRef<GridMode>((() => {
+    const v = localStorage.getItem(GRID_MODE_STORAGE_KEY);
+    return (v === "bpm" || v === "scr") ? v : "time";
+  })());
+  const [bpm, setBpm] = useState(() => {
+    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "138");
+    return isNaN(v) ? 138 : v;
+  });
+  const bpmRef = useRef((() => {
+    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "138");
+    return isNaN(v) ? 138 : v;
+  })());
+
+  // スクラッチ連続枚数カウント
+  const [_scrCount, setScrCount] = useState(0);
+  const scrCountRef = useRef(0);
+  const scrLastTimeRef = useRef<number>(-Infinity); // 最後にSCR方向変化があった時刻
+  const scrLastDirRef = useRef<number>(0);          // 最後のSCR方向
+  const scrOriginRef = useRef<number>(-Infinity);   // 現在runのカウント開始時刻（run中のみ有効）
+  const scrLastOriginRef = useRef<number>((() => {
+    // localStorageにはwall-clock(Date.now())で保存。起動時にperformance.now()基準に変換。
+    const saved = parseFloat(localStorage.getItem(SCR_ORIGIN_STORAGE_KEY) ?? "");
+    if (!isFinite(saved)) return -Infinity;
+    const offsetMs = Date.now() - saved; // 保存時からの経過時間
+    return -offsetMs; // performance.now()基準では負値（過去）
+  })());
 
   // キーコンフィグ state（ref も持つ：イベントハンドラ内から最新値参照するため）
   const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
@@ -330,6 +429,20 @@ export default function App() {
           last.end = nowJs;
           ch.spans.push({ start: nowJs, end: null, direction: dir });
         }
+        // SCRレーンの方向変化でカウントアップ
+        if (resolved.laneId === "SCR" && dir !== scrLastDirRef.current) {
+          scrLastDirRef.current = dir;
+          scrLastTimeRef.current = nowJs;
+          if (scrCountRef.current === 0) {
+            scrOriginRef.current = nowJs;     // 現在runの基点
+            scrLastOriginRef.current = nowJs; // 最後のrunの基点（消えない）
+            // wall-clock(Date.now())で保存: nowJs = performance.now() - startRef.current
+            const wallNow = Date.now() - performance.now() + nowJs + startRef.current;
+            localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
+          }
+          scrCountRef.current += 1;
+          setScrCount(scrCountRef.current);
+        }
       }
     });
 
@@ -359,6 +472,14 @@ export default function App() {
           axisLastRef.current.delete(key);
         }
       });
+
+      // SCR連続カウントリセット（一定時間入力がなければ0に）
+      if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > SCR_RESET_MS) {
+        scrCountRef.current = 0;
+        scrLastDirRef.current = 0;
+        scrOriginRef.current = -Infinity; // 現在runは終了（scrLastOriginRefは保持）
+        setScrCount(0);
+      }
 
       // 古いスパンを削除
       const cutoff = nowMs - SPAN_RETAIN;
@@ -400,7 +521,7 @@ export default function App() {
       }
 
       if (ctxRef.current && canvasRef.current) {
-        drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live", canvasRef.current.width);
+        drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live", canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current, scrLastOriginRef.current);
       }
 
       rafRef.current = requestAnimationFrame(loop);
@@ -561,12 +682,8 @@ export default function App() {
 
   return (
     <main style={{ background: "#111", minHeight: "100vh", color: "#eee", fontFamily: "monospace", padding: 16 }}>
-      <h2 style={{ margin: "0 0 8px" }}>scratch-trainer — input timeline</h2>
-      <p style={{ margin: "0 0 8px", color: "#888", fontSize: 12 }}>
-        キーボード A/Q/W &amp; ゲームパッド ボタン/Axis を検出します（Rust RawInput/gilrs）
-      </p>
 
-      {/* canvas + 縦スライダー */}
+      {/* canvas + 縦スライダー + グリッド設定 */}
       <div style={{ display: "flex", alignItems: "flex-start", gap: 4, overflowX: "auto" }}>
         <canvas
           ref={canvasRef}
@@ -574,7 +691,7 @@ export default function App() {
           height={CANVAS_H}
           style={{ display: "block", border: "1px solid #333", cursor: "grab", flexShrink: 0 }}
         />
-        {/* 縦スライダー: 上=過去、下=現在。max/valueはRAFループで直接DOM更新 */}
+        {/* 縦スライダー */}
         <input
           ref={sliderRef}
           type="range"
@@ -589,6 +706,49 @@ export default function App() {
             accentColor: "#f80",
           }}
         />
+        {/* グリッド切り替え */}
+        <div style={{
+          display: "flex", flexDirection: "column", gap: 8,
+          padding: "8px 10px", background: "#1a1a1a", border: "1px solid #333",
+          borderRadius: 6, fontSize: 12, fontFamily: "monospace", color: "#aaa",
+          height: "fit-content", flexShrink: 0,
+        }}>
+          <div style={{ color: "#666", fontSize: 10, marginBottom: 2 }}>グリッド</div>
+          {(["time", "bpm", "scr"] as GridMode[]).map(m => (
+            <label key={m} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="gridMode"
+                value={m}
+                checked={gridMode === m}
+                onChange={() => { setGridMode(m); gridModeRef.current = m; localStorage.setItem(GRID_MODE_STORAGE_KEY, m); }}
+                style={{ accentColor: "#f80" }}
+              />
+              {m === "time" ? "時間" : m === "bpm" ? "BPM" : "SCR基点"}
+            </label>
+          ))}
+          {(gridMode === "bpm" || gridMode === "scr") && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+              <input
+                type="number"
+                min={1} max={999}
+                value={bpm}
+                onChange={e => {
+                  const v = Math.max(1, Math.min(999, Number(e.target.value)));
+                  setBpm(v);
+                  bpmRef.current = v;
+                  localStorage.setItem(BPM_STORAGE_KEY, String(v));
+                }}
+                style={{
+                  width: 60, background: "#111", border: "1px solid #444",
+                  color: "#eee", fontFamily: "monospace", fontSize: 13,
+                  padding: "2px 4px", borderRadius: 3,
+                }}
+              />
+              <span style={{ color: "#555", fontSize: 10 }}>BPM</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 操作ボタン（常時表示、状態に応じてdisabled） */}
