@@ -2282,15 +2282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multiinput"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53f15c51cba0cc1234ace7ee6848df669a6da0d6a8bfc5fccd4a3f376a136e2f"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "ndk"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3423,13 +3414,13 @@ name = "scratch-trainer"
 version = "0.1.0"
 dependencies = [
  "gilrs",
- "multiinput",
  "rodio",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "windows 0.61.3",
 ]
 
 [[package]]

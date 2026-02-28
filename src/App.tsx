@@ -10,9 +10,10 @@ type InputEvent =
   | { kind: "AxisMove";   source: string; id: string; direction: number; value: number; t: number };
 
 interface Span {
-  start: number;
+  start: number;        // JS 基準ミリ秒 (描画に使う)
   end: number | null;
   direction?: number;
+  rustT?: number;       // ButtonDown 時の Rust タイムスタンプ (持続時間計算用)
 }
 
 interface Channel {
@@ -46,17 +47,20 @@ function drawTimeline(
   ctx.fillStyle = "#222";
   ctx.fillRect(0, 0, width, HEADER_H);
 
-  const msPerPx = TIME_WINDOW / (CANVAS_H - HEADER_H);
+  // 現在時刻 (nowMs) = 上端 (HEADER_H)、古いほど下
+  // tToY(nowMs) = HEADER_H、tToY(nowMs - TIME_WINDOW) = CANVAS_H - 1
+  const BODY_BOTTOM = CANVAS_H - 1;
+  const msPerPx = TIME_WINDOW / (BODY_BOTTOM - HEADER_H);
   const tToY = (t: number) => HEADER_H + (nowMs - t) / msPerPx;
 
-  // 時間グリッド
+  // 時間グリッド (500ms ごと)
   ctx.strokeStyle = "#333";
   ctx.lineWidth = 1;
   const gridStep = 500;
-  const firstGrid = Math.floor((nowMs - TIME_WINDOW) / gridStep) * gridStep;
+  const firstGrid = Math.ceil((nowMs - TIME_WINDOW) / gridStep) * gridStep;
   for (let g = firstGrid; g <= nowMs; g += gridStep) {
     const y = tToY(g);
-    if (y < HEADER_H || y > CANVAS_H) continue;
+    if (y < HEADER_H || y > BODY_BOTTOM) continue;
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(width, y);
@@ -86,25 +90,30 @@ function drawTimeline(
     ctx.fillText(ch.source.slice(0, 3), x + 4, HEADER_H - 18);
 
     // スパン
+    // tToY: 新しい時刻 → 小さい y（上）、古い時刻 → 大きい y（下）
+    // span.end or nowMs (新しい) が上端、span.start (古い) が下端
     for (const span of ch.spans) {
-      const yStart = tToY(span.start);
-      const yEnd   = span.end !== null ? tToY(span.end) : HEADER_H;
+      const yTop    = span.end !== null ? tToY(span.end) : tToY(nowMs);   // 入力終了 or 現在 = 上端
+      const yBottom = tToY(span.start);                                    // 入力開始 = 下端
 
-      if (yEnd > CANVAS_H || yStart < HEADER_H) continue;
+      // 完全に画面外はスキップ
+      if (yTop > BODY_BOTTOM || yBottom < HEADER_H) continue;
 
-      const top = Math.min(yStart, yEnd);
-      const h   = Math.max(Math.abs(yStart - yEnd), 3);
+      // 画面内にクリップ
+      const drawTop    = Math.max(yTop,    HEADER_H);
+      const drawBottom = Math.min(yBottom, BODY_BOTTOM);
+      const h          = Math.max(drawBottom - drawTop, 3);
 
       ctx.fillStyle = ch.kind === "button"
         ? (ch.source === "keyboard" ? "#4af" : "#fa4")
         : ((span.direction ?? 1) > 0 ? "#4f8" : "#f84");
 
-      ctx.fillRect(x + 4, top, COL_W - 8, h);
+      ctx.fillRect(x + 4, drawTop, COL_W - 8, h);
 
       if (span.end === null) {
         ctx.strokeStyle = "#fff";
         ctx.lineWidth = 2;
-        ctx.strokeRect(x + 4, top, COL_W - 8, h);
+        ctx.strokeRect(x + 4, drawTop, COL_W - 8, h);
       }
     }
   });
@@ -113,8 +122,8 @@ function drawTimeline(
   ctx.strokeStyle = "#f44";
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(0, CANVAS_H - 1);
-  ctx.lineTo(width, CANVAS_H - 1);
+  ctx.moveTo(0, HEADER_H);
+  ctx.lineTo(width, HEADER_H);
   ctx.stroke();
 }
 
@@ -143,34 +152,40 @@ export default function App() {
   }).current;
 
   // イベント受信
+  // ev.t は Rust 側の Instant 基準ミリ秒。JS の performance.now() とゼロ点が異なるため
+  // 受信時刻 (performance.now()) をそのまま使い、ボタン Up のみ押し時間を ev.t の差分で計算する。
   useEffect(() => {
     const unlisten = listen<InputEvent>("input-event", (e) => {
       const ev = e.payload;
+      // JS 基準の「今」 (IPC 遅延込みだが最速で表示できる)
+      const nowJs = performance.now() - startRef.current;
 
       if (ev.kind === "ButtonDown") {
         const ch = getOrCreateChannel(ev.source, ev.id, "button");
         const last = ch.spans.at(-1);
         if (!last || last.end !== null) {
-          ch.spans.push({ start: ev.t, end: null });
+          // start に JS 時刻 + Rust タイムスタンプ両方を保持
+          ch.spans.push({ start: nowJs, end: null, rustT: ev.t });
         }
       } else if (ev.kind === "ButtonUp") {
         const ch = getOrCreateChannel(ev.source, ev.id, "button");
         const last = ch.spans.at(-1);
         if (last && last.end === null) {
-          last.end = ev.t;
+          // 押し続けた時間 (Rust 側で正確に計測) を JS 時刻に加算して end を算出
+          const holdMs = last.rustT !== undefined ? ev.t - last.rustT : 0;
+          last.end = last.start + holdMs;
         }
       } else if (ev.kind === "AxisMove") {
         const ch = getOrCreateChannel(ev.source, ev.id, "axis");
         const key = `${ev.source}:${ev.id}`;
-        axisLastRef.current.set(key, ev.t);
+        axisLastRef.current.set(key, nowJs);
         const last = ch.spans.at(-1);
         if (!last || last.end !== null) {
-          ch.spans.push({ start: ev.t, end: null, direction: ev.direction });
+          ch.spans.push({ start: nowJs, end: null, direction: ev.direction });
         } else if (last.direction !== ev.direction) {
-          last.end = ev.t;
-          ch.spans.push({ start: ev.t, end: null, direction: ev.direction });
+          last.end = nowJs;
+          ch.spans.push({ start: nowJs, end: null, direction: ev.direction });
         }
-        // 同方向継続はスパンをそのまま延ばす（何もしない）
       }
     });
 

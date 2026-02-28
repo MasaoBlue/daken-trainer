@@ -1,5 +1,4 @@
 use gilrs::{Axis, Button, EventType, Gilrs};
-use multiinput::{KeyId, RawEvent, RawInputManager, State};
 use rodio::{OutputStream, Sink, Source};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -7,26 +6,18 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-// ---- 音再生 ----------------------------------------------------------------
-// スレッドを毎回立てず、専用スレッドに周波数を送るだけにする
+// ---- 音再生 (専用スレッド1本、スレッド増殖なし) ---------------------------
 
 fn spawn_audio_thread() -> mpsc::SyncSender<f32> {
-    // バッファ 64 個。溢れたら古いリクエストは捨てる (sync_channel で send がノンブロッキングに近い)
     let (tx, rx) = mpsc::sync_channel::<f32>(64);
-
     std::thread::spawn(move || {
-        // OutputStream はスレッドローカルで一度だけ確保
         let Ok((_stream, handle)) = OutputStream::try_default() else {
-            eprintln!("audio: OutputStream init failed");
             return;
         };
         let Ok(sink) = Sink::try_new(&handle) else {
-            eprintln!("audio: Sink init failed");
             return;
         };
-
         for freq in rx {
-            // キューが溜まりすぎている場合は古いものを破棄して追いつく
             if sink.len() > 4 {
                 sink.clear();
             }
@@ -36,83 +27,177 @@ fn spawn_audio_thread() -> mpsc::SyncSender<f32> {
             sink.append(source);
         }
     });
-
     tx
 }
 
-// ---- イベント型 (フロントエンドに送信) ------------------------------------
+// ---- イベント型 ------------------------------------------------------------
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind")]
 enum InputEvent {
-    ButtonDown {
-        source: String,
-        id: String,
-        t: f64,
-    },
-    ButtonUp {
-        source: String,
-        id: String,
-        t: f64,
-    },
-    AxisMove {
-        source: String,
-        id: String,
-        direction: i8,
-        value: f32,
-        t: f64,
-    },
+    ButtonDown { source: String, id: String, t: f64 },
+    ButtonUp   { source: String, id: String, t: f64 },
+    AxisMove   { source: String, id: String, direction: i8, value: f32, t: f64 },
 }
 
-// ---- キーボードリスナー ----------------------------------------------------
+// ---- キーボードリスナー (Windows RawInput 直接実装) -----------------------
+//
+// multiinput 0.1.0 には VecDeque の無制限成長・ハンドルリークが確認されたため
+// windows クレートで WM_INPUT を直接受け取る hidden window 方式に置き換え。
+// イベントはメッセージループで処理するため外部キューへの蓄積がない。
 
-fn start_keyboard_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSender<f32>) {
-    let key_freqs: HashMap<KeyId, f32> = [
-        (KeyId::A, 440.0),
-        (KeyId::Q, 330.0),
-        (KeyId::W, 550.0),
-    ]
-    .into();
+#[cfg(windows)]
+mod raw_keyboard {
+    use super::*;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::Input::{
+        GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT,
+        RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
+        RegisterClassW, CS_HREDRAW, CS_VREDRAW, MSG, WM_DESTROY, WM_INPUT, WNDCLASSW,
+        WS_OVERLAPPEDWINDOW,
+    };
 
-    std::thread::spawn(move || {
-        let Ok(mut manager) = RawInputManager::new() else {
-            eprintln!("RawInputManager init failed");
-            return;
-        };
-        manager.register_devices(multiinput::DeviceType::Keyboards);
+    // Virtual-Key codes
+    const VK_A: u16 = 0x41;
+    const VK_Q: u16 = 0x51;
+    const VK_W: u16 = 0x57;
+    // WM_INPUT RI_KEY flags
+    const RI_KEY_MAKE:  u16 = 0x00; // key down
+    const RI_KEY_BREAK: u16 = 0x01; // key up
 
-        loop {
-            if let Some(event) = manager.get_event() {
-                let t = epoch.elapsed().as_secs_f64() * 1000.0;
-                match event {
-                    RawEvent::KeyboardEvent(_, key_id, State::Pressed) => {
-                        if let Some(&freq) = key_freqs.get(&key_id) {
-                            let _ = audio_tx.try_send(freq);
+    // スレッド間でコールバックに渡すためグローバルに持つ
+    static mut CALLBACK: Option<Box<dyn Fn(u16, bool) + Send + Sync>> = None;
+
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_DESTROY {
+            PostQuitMessage(0);
+            return LRESULT(0);
+        }
+        if msg == WM_INPUT {
+            let mut size: u32 = 0;
+            GetRawInputData(
+                HRAWINPUT(lparam.0 as *mut _),
+                RID_INPUT,
+                None,
+                &mut size,
+                std::mem::size_of::<RAWINPUTHEADER>() as u32,
+            );
+            if size > 0 {
+                let mut buf = vec![0u8; size as usize];
+                let read = GetRawInputData(
+                    HRAWINPUT(lparam.0 as *mut _),
+                    RID_INPUT,
+                    Some(buf.as_mut_ptr() as *mut _),
+                    &mut size,
+                    std::mem::size_of::<RAWINPUTHEADER>() as u32,
+                );
+                if read == size {
+                    let raw = &*(buf.as_ptr() as *const RAWINPUT);
+                    if raw.header.dwType == RIM_TYPEKEYBOARD.0 {
+                        let kb = &raw.data.keyboard;
+                        let vkey  = kb.VKey;
+                        let flags = kb.Flags;
+                        let is_down = (flags & RI_KEY_BREAK) == RI_KEY_MAKE;
+                        if let Some(cb) = &CALLBACK {
+                            cb(vkey, is_down);
                         }
-                        let _ = app.emit(
-                            "input-event",
-                            InputEvent::ButtonDown {
-                                source: "keyboard".into(),
-                                id: format!("{:?}", key_id),
-                                t,
-                            },
-                        );
                     }
-                    RawEvent::KeyboardEvent(_, key_id, State::Released) => {
-                        let _ = app.emit(
-                            "input-event",
-                            InputEvent::ButtonUp {
-                                source: "keyboard".into(),
-                                id: format!("{:?}", key_id),
-                                t,
-                            },
-                        );
-                    }
-                    _ => {}
                 }
             }
+            return LRESULT(0);
         }
-    });
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
+    pub fn start(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSender<f32>) {
+        let key_freqs: HashMap<u16, f32> = [
+            (VK_A, 440.0),
+            (VK_Q, 330.0),
+            (VK_W, 550.0),
+        ]
+        .into();
+
+        std::thread::spawn(move || unsafe {
+            // コールバックをグローバルに設定
+            CALLBACK = Some(Box::new(move |vkey: u16, is_down: bool| {
+                let t = epoch.elapsed().as_secs_f64() * 1000.0;
+                let id = vkey_name(vkey);
+                if is_down {
+                    if let Some(&freq) = key_freqs.get(&vkey) {
+                        let _ = audio_tx.try_send(freq);
+                    }
+                    let _ = app.emit("input-event", InputEvent::ButtonDown {
+                        source: "keyboard".into(), id, t,
+                    });
+                } else {
+                    let _ = app.emit("input-event", InputEvent::ButtonUp {
+                        source: "keyboard".into(), id, t,
+                    });
+                }
+            }));
+
+            let hinstance = GetModuleHandleW(None).unwrap();
+            let hinstance_opt: windows::Win32::Foundation::HINSTANCE = hinstance.into();
+            let class_name: Vec<u16> = "RawInputWindow\0".encode_utf16().collect();
+
+            let wc = WNDCLASSW {
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(wnd_proc),
+                hInstance: hinstance_opt,
+                lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+
+            let win_title: Vec<u16> = "RawInput\0".encode_utf16().collect();
+            let hwnd = CreateWindowExW(
+                Default::default(),
+                windows::core::PCWSTR(class_name.as_ptr()),
+                windows::core::PCWSTR(win_title.as_ptr()),
+                WS_OVERLAPPEDWINDOW,
+                0, 0, 0, 0,
+                None, None,
+                Some(hinstance_opt),
+                None,
+            ).unwrap();
+
+            // キーボードデバイスを登録 (RIDEV_INPUTSINK = フォーカス不要)
+            let rid = RAWINPUTDEVICE {
+                usUsagePage: 0x01, // Generic Desktop
+                usUsage:     0x06, // Keyboard
+                dwFlags:     RIDEV_INPUTSINK,
+                hwndTarget:  hwnd,
+            };
+            RegisterRawInputDevices(
+                std::slice::from_ref(&rid),
+                std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+            ).unwrap();
+
+            // メッセージループ (ブロッキング、イベントが来たときだけ処理)
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+            }
+        });
+    }
+
+    fn vkey_name(vkey: u16) -> String {
+        match vkey {
+            VK_A => "A".into(),
+            VK_Q => "Q".into(),
+            VK_W => "W".into(),
+            _ => format!("VK_{:02X}", vkey),
+        }
+    }
 }
 
 // ---- ゲームパッドリスナー --------------------------------------------------
@@ -137,52 +222,40 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant, audio_tx: mpsc::SyncSe
             eprintln!("gilrs init failed");
             return;
         };
-
         loop {
             while let Some(gilrs::Event { event, .. }) = gilrs.next_event() {
                 let t = epoch.elapsed().as_secs_f64() * 1000.0;
-
                 match event {
                     EventType::ButtonPressed(btn, _) => {
                         if let Some(&freq) = button_freqs.get(&btn) {
                             let _ = audio_tx.try_send(freq);
                         }
-                        let _ = app.emit(
-                            "input-event",
-                            InputEvent::ButtonDown {
-                                source: "gamepad".into(),
-                                id: format!("{:?}", btn),
-                                t,
-                            },
-                        );
+                        let _ = app.emit("input-event", InputEvent::ButtonDown {
+                            source: "gamepad".into(),
+                            id: format!("{:?}", btn),
+                            t,
+                        });
                     }
                     EventType::ButtonReleased(btn, _) => {
-                        let _ = app.emit(
-                            "input-event",
-                            InputEvent::ButtonUp {
-                                source: "gamepad".into(),
-                                id: format!("{:?}", btn),
-                                t,
-                            },
-                        );
+                        let _ = app.emit("input-event", InputEvent::ButtonUp {
+                            source: "gamepad".into(),
+                            id: format!("{:?}", btn),
+                            t,
+                        });
                     }
                     EventType::AxisChanged(axis, value, _) => {
                         let prev = *prev_axis.get(&axis).unwrap_or(&0.0);
                         let delta = value - prev;
                         if delta.abs() > AXIS_DEAD {
                             let direction: i8 = if delta > 0.0 { 1 } else { -1 };
-                            let freq = if direction > 0 { 600.0 } else { 500.0 };
-                            let _ = audio_tx.try_send(freq);
-                            let _ = app.emit(
-                                "input-event",
-                                InputEvent::AxisMove {
-                                    source: "gamepad".into(),
-                                    id: format!("{:?}", axis),
-                                    direction,
-                                    value,
-                                    t,
-                                },
-                            );
+                            let _ = audio_tx.try_send(if direction > 0 { 600.0 } else { 500.0 });
+                            let _ = app.emit("input-event", InputEvent::AxisMove {
+                                source: "gamepad".into(),
+                                id: format!("{:?}", axis),
+                                direction,
+                                value,
+                                t,
+                            });
                         }
                         prev_axis.insert(axis, value);
                     }
@@ -203,14 +276,15 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let epoch = Instant::now();
+    let epoch    = Instant::now();
     let audio_tx = spawn_audio_thread();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![greet])
         .setup(move |app| {
-            start_keyboard_listener(app.handle().clone(), epoch, audio_tx.clone());
+            #[cfg(windows)]
+            raw_keyboard::start(app.handle().clone(), epoch, audio_tx.clone());
             start_gamepad_listener(app.handle().clone(), epoch, audio_tx);
             Ok(())
         })
