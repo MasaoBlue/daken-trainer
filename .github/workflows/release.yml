@@ -67,16 +67,25 @@ jobs:
 
       - name: Build Tauri app
         if: steps.tag_check.outputs.exists == 'false'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm tauri build
+
+      - name: Create zip
+        if: steps.tag_check.outputs.exists == 'false'
+        shell: bash
+        run: |
+          cd src-tauri/target/release
+          7z a -tzip "../../../daken-trainer_${{ steps.version.outputs.version }}_x64.zip" daken-trainer.exe
+
+      - name: Create GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: v${{ steps.version.outputs.version }}
-          releaseName: v${{ steps.version.outputs.version }}
-          releaseBody: |
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body: |
             ## What's Changed
 
             See the [commit history](https://github.com/${{ github.repository }}/commits/main) for details.
-          releaseDraft: false
-          prerelease: false
-          includeDebug: false
+          files: daken-trainer_${{ steps.version.outputs.version }}_x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
