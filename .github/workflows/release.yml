@@ -67,7 +67,7 @@ jobs:
 
       - name: Build Tauri app
         if: steps.tag_check.outputs.exists == 'false'
-        run: pnpm tauri build
+        run: pnpm tauri build --no-bundle
 
       - name: Create zip
         if: steps.tag_check.outputs.exists == 'false'
@@ -83,9 +83,9 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
           body: |
-            ## What's Changed
-
-            See the [commit history](https://github.com/${{ github.repository }}/commits/main) for details.
+            `daken-trainer_*_x64.zip` をダウンロードしてください（Source codeは開発者向けです）。
+          append_body: true
+          generate_release_notes: true
           files: daken-trainer_${{ steps.version.outputs.version }}_x64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
