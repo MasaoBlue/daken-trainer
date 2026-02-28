@@ -50,8 +50,6 @@ jobs:
       - name: Setup pnpm
         if: steps.tag_check.outputs.exists == 'false'
         uses: pnpm/action-setup@v4
-        with:
-          version: '10'
 
       - name: Install Rust stable
         if: steps.tag_check.outputs.exists == 'false'
