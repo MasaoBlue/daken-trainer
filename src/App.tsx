@@ -48,6 +48,9 @@ const STORAGE_KEY            = "scratch-trainer-keyconfig";
 const BPM_STORAGE_KEY        = "scratch-trainer-bpm";
 const SCR_ORIGIN_STORAGE_KEY = "scratch-trainer-scr-origin";
 const GRID_MODE_STORAGE_KEY  = "scratch-trainer-grid-mode";
+const METRO_ON_KEY           = "scratch-trainer-metro-on";
+const METRO_DIV_KEY          = "scratch-trainer-metro-div"; // "4" | "8"
+const METRO_VOL_KEY          = "scratch-trainer-metro-vol";
 
 function loadConfig(): KeyConfig {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"); } catch { return {}; }
@@ -341,6 +344,24 @@ export default function App() {
     return isNaN(v) ? 138 : v;
   })());
 
+  // メトロノーム設定
+  const [metroOn, setMetroOn] = useState(() => localStorage.getItem(METRO_ON_KEY) === "1");
+  const metroOnRef = useRef(localStorage.getItem(METRO_ON_KEY) === "1");
+  const [metroDiv, setMetroDiv] = useState<4 | 8>(() => localStorage.getItem(METRO_DIV_KEY) === "8" ? 8 : 4);
+  const metroDivRef = useRef<4 | 8>(localStorage.getItem(METRO_DIV_KEY) === "8" ? 8 : 4);
+  const [metroVol, setMetroVol] = useState(() => {
+    const v = parseFloat(localStorage.getItem(METRO_VOL_KEY) ?? "0.5");
+    return isNaN(v) ? 0.5 : Math.max(0, Math.min(1, v));
+  });
+  const metroVolRef = useRef((() => {
+    const v = parseFloat(localStorage.getItem(METRO_VOL_KEY) ?? "0.5");
+    return isNaN(v) ? 0.5 : Math.max(0, Math.min(1, v));
+  })());
+  // AudioContext（初回インタラクション後に生成）
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  // 次にスケジュール済みの拍インデックス（メトロノーム先読み管理）
+  const metroNextBeatRef = useRef<number | null>(null); // 次に鳴らすべき拍インデックス
+
   // スクラッチ連続枚数カウント
   const [_scrCount, setScrCount] = useState(0);
   const scrCountRef = useRef(0);
@@ -456,10 +477,70 @@ export default function App() {
     }
   }, []);
 
+  // メトロノームのクリック音を AudioContext でスケジューリング
+  // isMeasure=true → 高音(880Hz), false → 中音(440Hz), isHalf=true → 8分音符(330Hz)
+  const scheduleClick = (audioCtx: AudioContext, atTime: number, isMeasure: boolean, isHalf: boolean, vol: number) => {
+    const gainNode = audioCtx.createGain();
+    gainNode.connect(audioCtx.destination);
+    const freq = isMeasure ? 880 : isHalf ? 330 : 440;
+    const peakVol = isHalf ? vol * 0.5 : vol;
+    gainNode.gain.setValueAtTime(peakVol, atTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, atTime + 0.04);
+    const osc = audioCtx.createOscillator();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(freq, atTime);
+    osc.connect(gainNode);
+    osc.start(atTime);
+    osc.stop(atTime + 0.05);
+  };
+
   // RAF 描画ループ
   useEffect(() => {
     const loop = () => {
       const nowMs = performance.now() - startRef.current;
+
+      // メトロノーム先読みスケジューリング
+      const LOOKAHEAD_MS = 120; // 先読み時間
+      if (metroOnRef.current && audioCtxRef.current) {
+        const ac = audioCtxRef.current;
+        const gm = gridModeRef.current;
+        const bpmVal = bpmRef.current;
+        if ((gm === "bpm" || gm === "scr") && bpmVal > 0) {
+          // メトロノームは常にepoch基点（起動時刻=0）で一定間隔に鳴らし続ける
+          // SCRモードでもグリッド表示の基点とは独立して動作する
+          const origin = 0;
+          if (true) {
+            const beatMs = 60000 / bpmVal;
+            const subDiv = metroDivRef.current; // 4 or 8
+            const subMs = beatMs / (subDiv / 4);   // 4分=beatMs, 8分=beatMs/2
+            // 現在時刻に対応するサブ拍インデックス
+            const nowBeat = Math.floor((nowMs - origin) / subMs);
+            if (metroNextBeatRef.current === null || metroNextBeatRef.current <= nowBeat) {
+              metroNextBeatRef.current = nowBeat;
+            }
+            // 先読み範囲内の拍をスケジュール
+            while (true) {
+              const beatIdx: number = metroNextBeatRef.current!;
+              const beatTimeMs = origin + beatIdx * subMs;
+              if (beatTimeMs > nowMs + LOOKAHEAD_MS) break;
+              if (beatTimeMs >= nowMs - 10) { // 過去10ms以内なら許容してスケジュール
+                const acTime = ac.currentTime + (beatTimeMs - nowMs) / 1000;
+                if (acTime >= ac.currentTime) {
+                  const quarterIdx = Math.round((beatTimeMs - origin) / beatMs);
+                  const isMeasure = quarterIdx % 4 === 0;
+                  const isHalf = subDiv === 8 && beatIdx % 2 !== 0;
+                  scheduleClick(ac, acTime, isMeasure, isHalf, metroVolRef.current);
+                }
+              }
+              metroNextBeatRef.current = beatIdx + 1;
+            }
+          }
+        }
+      }
+      // メトロノームがオフになったら次回スケジュールをリセット
+      if (!metroOnRef.current) {
+        metroNextBeatRef.current = null;
+      }
 
       // axis タイムアウト
       axisLastRef.current.forEach((lastT, key) => {
@@ -737,6 +818,7 @@ export default function App() {
                   const v = Math.max(1, Math.min(999, Number(e.target.value)));
                   setBpm(v);
                   bpmRef.current = v;
+                  metroNextBeatRef.current = null; // BPM変更時はスケジュールリセット
                   localStorage.setItem(BPM_STORAGE_KEY, String(v));
                 }}
                 style={{
@@ -746,6 +828,72 @@ export default function App() {
                 }}
               />
               <span style={{ color: "#555", fontSize: 10 }}>BPM</span>
+
+              {/* メトロノーム設定 */}
+              <div style={{ borderTop: "1px solid #333", paddingTop: 6, marginTop: 2, display: "flex", flexDirection: "column", gap: 5 }}>
+                <div style={{ color: "#666", fontSize: 10 }}>メトロノーム</div>
+                {/* ON/OFF */}
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={metroOn}
+                    onChange={e => {
+                      const on = e.target.checked;
+                      setMetroOn(on);
+                      metroOnRef.current = on;
+                      metroNextBeatRef.current = null;
+                      localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
+                      // AudioContext を初回ON時に生成
+                      if (on && !audioCtxRef.current) {
+                        audioCtxRef.current = new AudioContext();
+                      }
+                      if (on && audioCtxRef.current?.state === "suspended") {
+                        audioCtxRef.current.resume();
+                      }
+                    }}
+                    style={{ accentColor: "#f80" }}
+                  />
+                  <span style={{ color: metroOn ? "#f80" : "#666", fontSize: 11 }}>
+                    {metroOn ? "ON" : "OFF"}
+                  </span>
+                </label>
+                {/* 4分/8分 */}
+                <div style={{ display: "flex", gap: 6 }}>
+                  {([4, 8] as const).map(d => (
+                    <label key={d} style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="metroDiv"
+                        checked={metroDiv === d}
+                        onChange={() => {
+                          setMetroDiv(d);
+                          metroDivRef.current = d;
+                          metroNextBeatRef.current = null;
+                          localStorage.setItem(METRO_DIV_KEY, String(d));
+                        }}
+                        style={{ accentColor: "#f80" }}
+                      />
+                      <span style={{ fontSize: 11 }}>{d}分</span>
+                    </label>
+                  ))}
+                </div>
+                {/* 音量 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <input
+                    type="range"
+                    min={0} max={1} step={0.05}
+                    value={metroVol}
+                    onChange={e => {
+                      const v = Number(e.target.value);
+                      setMetroVol(v);
+                      metroVolRef.current = v;
+                      localStorage.setItem(METRO_VOL_KEY, String(v));
+                    }}
+                    style={{ width: 60, accentColor: "#f80" }}
+                  />
+                  <span style={{ color: "#555", fontSize: 10 }}>音量</span>
+                </div>
+              </div>
             </div>
           )}
         </div>
