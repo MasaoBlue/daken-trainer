@@ -305,7 +305,8 @@ function drawBarChart(
   // ALL_DIVS=[4,5,...,32] → noteRefMs[0]=d4(大きいms遅い), noteRefMs.at(-1)=d32(小さいms速い)
   // minMs=上端=速い=小さいms=32分のms*0.5
   // maxMs=下端=遅い=大きいms=4分のms*1.5
-  const minMs = noteRefMs.at(-1)?.ms > 0 ? noteRefMs.at(-1)!.ms * 0.5 : 10;
+  const lastMs = noteRefMs.at(-1)?.ms ?? 0;
+  const minMs = lastMs > 0 ? lastMs * 0.5 : 10;
   const maxMs = noteRefMs[0]?.ms > 0 ? noteRefMs[0].ms * 1.5
     : (intervals.length > 0 ? Math.max(...intervals.map(e => e.ms)) * 1.5 : 1000);
 
@@ -450,7 +451,7 @@ export default function App() {
   const pausedMaxMsRef = useRef<number | null>(null); // paused中に固定するスライダーmax
   const sliderRef = useRef<HTMLInputElement>(null);
 
-  const [channelCount, setChannelCount] = useState(0);
+  const [_channelCount, setChannelCount] = useState(0);
   const [mode, setMode] = useState<PlaybackMode>("live");
 
   // グリッド設定
@@ -476,7 +477,7 @@ export default function App() {
   });
 
   // 緑数字
-  const [greenNum, setGreenNum] = useState(() => {
+  const [_greenNum, setGreenNum] = useState(() => {
     const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
     return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v));
   });
