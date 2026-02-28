@@ -46,12 +46,13 @@ interface Channel {
 
 const CANVAS_H          = 600;
 const HEADER_H          = 40;
-const TIME_WINDOW       = 3000;
+const GREEN_NUM_STORAGE_KEY = "scratch-trainer-green-num";
+const GREEN_NUM_DEFAULT     = 600;
 const AXIS_TIMEOUT      = 150;
 const SCR_RESET_MS      = 500;
 const SPAN_RETAIN       = 600000;
-const INTERVAL_HISTORY  = 50; // 棒グラフに表示する直近N枚分
-const CHART_W           = 520; // 棒グラフ固定幅 (px): 50枚 × 約10px/本
+const INTERVAL_HISTORY  = 200; // 棒グラフに表示する直近N枚分
+const CHART_W           = 570; // 棒グラフ固定幅 (px)
 const CHART_H           = 160; // 棒グラフ固定高さ (px)
 
 // ---- ストレージキー ---------------------------------------------------------
@@ -63,6 +64,7 @@ const GRID_MODE_STORAGE_KEY  = "scratch-trainer-grid-mode";
 const METRO_ON_KEY           = "scratch-trainer-metro-on";
 const METRO_DIV_KEY          = "scratch-trainer-metro-div";
 const METRO_VOL_KEY          = "scratch-trainer-metro-vol";
+const SIDE_KEY               = "scratch-trainer-side";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
 
@@ -106,7 +108,7 @@ interface LaneDef {
 }
 
 const LANE_DEFS: LaneDef[] = [
-  { id: "SCR",  label: "SCR", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
+  { id: "SCR",  label: "Scratch", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
   { id: "KEY1", label: "1",   w: 52,  noteColor: "#eee" },
   { id: "KEY2", label: "2",   w: 40,  noteColor: "#48f" },
   { id: "KEY3", label: "3",   w: 52,  noteColor: "#eee" },
@@ -132,6 +134,8 @@ function drawTimeline(
   bpm: number,
   scrLastOriginMs: number,
   scrLastInputMs: number,
+  laneDefs: LaneDef[],
+  timeWindow: number,
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
   ctx.fillStyle = "#111";
@@ -140,73 +144,38 @@ function drawTimeline(
   ctx.fillRect(0, 0, width, HEADER_H);
 
   const BODY_BOTTOM = CANVAS_H - 1;
-  const msPerPx = TIME_WINDOW / (BODY_BOTTOM - HEADER_H);
+  const msPerPx = timeWindow / (BODY_BOTTOM - HEADER_H);
   const tToY = (t: number) => HEADER_H + (viewNowMs - t) / msPerPx;
 
-  ctx.strokeStyle = "#484848";
-  ctx.lineWidth = 1;
-  if (gridMode === "time") {
-    const gridStep = 500;
-    const firstGrid = Math.ceil((viewNowMs - TIME_WINDOW) / gridStep) * gridStep;
-    for (let g = firstGrid; g <= viewNowMs; g += gridStep) {
-      const y = tToY(g);
-      if (y < HEADER_H || y > BODY_BOTTOM) continue;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-      ctx.fillStyle = "#777"; ctx.font = "10px monospace";
-      ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
-    }
-  } else if (gridMode === "bpm") {
-    const beatMs = 60000 / bpm;
-    const firstBeat = Math.ceil((viewNowMs - TIME_WINDOW) / beatMs) * beatMs;
-    let beatIdx = Math.round(firstBeat / beatMs);
-    for (let g = firstBeat; g <= viewNowMs; g += beatMs, beatIdx++) {
-      const y = tToY(g);
-      if (y < HEADER_H || y > BODY_BOTTOM) continue;
-      const isMeasure = beatIdx % 4 === 0;
-      ctx.strokeStyle = isMeasure ? "#777" : "#484848";
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-      if (isMeasure) {
-        ctx.fillStyle = "#999"; ctx.font = "10px monospace";
-        ctx.fillText(`${Math.round(beatIdx / 4 + 1)}`, 2, y - 2);
-      }
-    }
-  } else if (gridMode === "scr" && isFinite(scrLastOriginMs)) {
-    const origin = scrLastOriginMs;
-    const beatMs = 60000 / bpm;
-    const rangeStart = viewNowMs - TIME_WINDOW;
-    const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
-    const scrGridEnd = isFinite(scrLastInputMs) ? scrLastInputMs : viewNowMs;
-    for (let i = firstBeatOffset; ; i++) {
-      const g = origin + i * beatMs;
-      if (g > viewNowMs) break;
-      if (g < origin) continue;
-      if (g > scrGridEnd) continue;
-      const y = tToY(g);
-      if (y < HEADER_H || y > BODY_BOTTOM) continue;
-      const isMeasure = i % 4 === 0;
-      ctx.strokeStyle = isMeasure ? "#779" : "#446";
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-      if (isMeasure) {
-        ctx.fillStyle = "#99b"; ctx.font = "10px monospace";
-        ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
-      }
-    }
-  }
-
   let xOffset = 0;
-  for (const lane of LANE_DEFS) {
+  for (const lane of laneDefs) {
     const x = xOffset;
     xOffset += lane.w;
+
+    // アクティブ中のスパンがあればヘッダーを薄く着色
+    const ch = channels.find((c) => c.id === lane.id);
+    const activeSpan = ch?.spans.find(s => s.end === null);
+    if (activeSpan) {
+      const activeColor = activeSpan.direction !== undefined && activeSpan.direction < 0
+        ? (lane.axisColorNeg ?? lane.noteColor)
+        : (activeSpan.direction !== undefined ? (lane.axisColorPos ?? lane.noteColor) : lane.noteColor);
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = activeColor;
+      ctx.fillRect(x, 0, lane.w, HEADER_H);
+      ctx.restore();
+    }
+
     ctx.strokeStyle = "#333"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x + lane.w, HEADER_H); ctx.lineTo(x + lane.w, CANVAS_H); ctx.stroke();
+    ctx.textAlign = "center";
     ctx.fillStyle = "#ccc"; ctx.font = "bold 11px monospace";
-    ctx.fillText(lane.label, x + 4, HEADER_H - 6);
+    ctx.fillText(lane.label, x + lane.w / 2, HEADER_H - 4);
     if (lane.id === "SCR" && scrCount > 0) {
       ctx.fillStyle = "#ff0"; ctx.font = "bold 14px monospace";
-      const label = String(scrCount);
-      ctx.fillText(label, x + lane.w / 2 - (label.length * 4), HEADER_H - 6);
+      ctx.fillText(String(scrCount), x + lane.w / 2, HEADER_H - 20);
     }
-    const ch = channels.find((c) => c.id === lane.id);
+    ctx.textAlign = "left";
     if (!ch) continue;
     const pad = Math.max(2, Math.floor(lane.w * 0.06));
     const TICK_H = 5;
@@ -237,7 +206,7 @@ function drawTimeline(
         const endMarkerTop    = Math.max(drawTop, HEADER_H);
         const endMarkerBottom = Math.min(drawTop + 3, BODY_BOTTOM);
         if (endMarkerBottom > endMarkerTop) {
-          ctx.globalAlpha = 0.2; ctx.fillStyle = color;
+          ctx.globalAlpha = 0.06; ctx.fillStyle = color;
           ctx.fillRect(lx + 1, endMarkerTop, lw - 2, endMarkerBottom - endMarkerTop);
           ctx.globalAlpha = 1.0;
         }
@@ -245,9 +214,60 @@ function drawTimeline(
     }
   }
 
-  ctx.strokeStyle = isLive ? "#f44" : "#f80";
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(0, HEADER_H); ctx.lineTo(width, HEADER_H); ctx.stroke();
+  // グリッド線をレーンの手前に描画
+  ctx.strokeStyle = "#484848";
+  ctx.lineWidth = 1;
+  ctx.save();
+  ctx.translate(0, 0.5);
+  if (gridMode === "time") {
+    const gridStep = 500;
+    const firstGrid = Math.ceil((viewNowMs - timeWindow) / gridStep) * gridStep;
+    for (let g = firstGrid; g <= viewNowMs; g += gridStep) {
+      const y = Math.round(tToY(g));
+      if (y < HEADER_H || y > BODY_BOTTOM) continue;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      ctx.fillStyle = "#777"; ctx.font = "10px monospace";
+      ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
+    }
+  } else if (gridMode === "bpm") {
+    const beatMs = 60000 / bpm;
+    const firstBeat = Math.ceil((viewNowMs - timeWindow) / beatMs) * beatMs;
+    let beatIdx = Math.round(firstBeat / beatMs);
+    for (let g = firstBeat; g <= viewNowMs; g += beatMs, beatIdx++) {
+      const y = Math.round(tToY(g));
+      if (y < HEADER_H || y > BODY_BOTTOM) continue;
+      const isMeasure = beatIdx % 4 === 0;
+      ctx.strokeStyle = isMeasure ? "#aaa" : "#484848";
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      if (isMeasure) {
+        ctx.fillStyle = "#999"; ctx.font = "10px monospace";
+        ctx.fillText(`${Math.round(beatIdx / 4 + 1)}`, 2, y - 2);
+      }
+    }
+  } else if (gridMode === "scr" && isFinite(scrLastOriginMs)) {
+    const origin = scrLastOriginMs;
+    const beatMs = 60000 / bpm;
+    const rangeStart = viewNowMs - timeWindow;
+    const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
+    const scrGridEnd = isFinite(scrLastInputMs) ? scrLastInputMs : viewNowMs;
+    for (let i = firstBeatOffset; ; i++) {
+      const g = origin + i * beatMs;
+      if (g > viewNowMs) break;
+      if (g < origin) continue;
+      if (g > scrGridEnd) continue;
+      const y = Math.round(tToY(g));
+      if (y < HEADER_H || y > BODY_BOTTOM) continue;
+      const isMeasure = i % 4 === 0;
+      ctx.strokeStyle = isMeasure ? "#aaf" : "#446";
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      if (isMeasure) {
+        ctx.fillStyle = "#99b"; ctx.font = "10px monospace";
+        ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
+      }
+    }
+  }
+  ctx.restore();
+
 }
 
 // ---- 棒グラフ Canvas 描画 ---------------------------------------------------
@@ -307,7 +327,7 @@ function drawBarChart(
   // バー幅: intervals数に応じて可変、最小2px、最大10px
   // 右端が最新。左から並べ、足りない分は右端まで詰めない（左余白なし、左から順に配置）
   const count = intervals.length;
-  const barW = count > 0 ? Math.max(2, Math.min(10, Math.floor(plotW / count))) : 8;
+  const barW = count > 0 ? Math.max(1, Math.min(10, Math.floor(plotW / count))) : 8;
   // バーが足りない場合は左詰め（右にスペースが余る）
   // バーが多い場合は右端まで使う（INTERVAL_HISTORY以上になることはないが念のため）
 
@@ -439,13 +459,31 @@ export default function App() {
     return (v === "bpm" || v === "scr") ? v : "time";
   })());
   const [bpm, setBpm] = useState(() => {
-    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "138");
-    return isNaN(v) ? 138 : v;
+    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "150");
+    return isNaN(v) ? 150 : v;
   });
   const bpmRef = useRef((() => {
-    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "138");
-    return isNaN(v) ? 138 : v;
+    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "150");
+    return isNaN(v) ? 150 : v;
   })());
+  const [bpmText, setBpmText] = useState(() => {
+    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "150");
+    return String(isNaN(v) ? 150 : v);
+  });
+
+  // 緑数字
+  const [greenNum, setGreenNum] = useState(() => {
+    const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
+    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(999, v));
+  });
+  const greenNumRef = useRef((() => {
+    const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
+    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(999, v));
+  })());
+  const [greenNumText, setGreenNumText] = useState(() => {
+    const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
+    return String(isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(999, v)));
+  });
 
   // メトロノーム
   const [metroOn, setMetroOn] = useState(() => localStorage.getItem(METRO_ON_KEY) === "1");
@@ -462,6 +500,14 @@ export default function App() {
   })());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const metroNextBeatRef = useRef<number | null>(null);
+
+  // 1P / 2P
+  const [side, setSide] = useState<"1P" | "2P">(() =>
+    localStorage.getItem(SIDE_KEY) === "2P" ? "2P" : "1P"
+  );
+  const sideRef = useRef<"1P" | "2P">(
+    localStorage.getItem(SIDE_KEY) === "2P" ? "2P" : "1P"
+  );
 
   // SCR カウント・情報
   const [_scrCount, setScrCount] = useState(0);
@@ -750,9 +796,13 @@ export default function App() {
       }
 
       if (ctxRef.current && canvasRef.current) {
+        const orderedLanes = sideRef.current === "2P"
+          ? [...LANE_DEFS.filter(l => l.id !== "SCR"), LANE_DEFS.find(l => l.id === "SCR")!]
+          : LANE_DEFS;
         drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
           canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
-          scrLastOriginRef.current, scrLastTimeRef.current);
+          scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
+          greenNumRef.current * 1000 / 600);
       }
       if (chartCtxRef.current) {
         drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, CHART_W, CHART_H);
@@ -766,7 +816,7 @@ export default function App() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const msPerPx = TIME_WINDOW / (CANVAS_H - 1 - HEADER_H);
+    const getMsPerPx = () => (greenNumRef.current * 1000 / 600) / (CANVAS_H - 1 - HEADER_H);
     const pause = (viewMs: number) => {
       if (pausedMaxMsRef.current === null) {
         pausedMaxMsRef.current = performance.now() - startRef.current;
@@ -780,7 +830,7 @@ export default function App() {
       const nowMs = performance.now() - startRef.current;
       const pb = playbackRef.current;
       const cur = pb.mode === "live" ? nowMs : pb.mode === "playing" ? pb.viewMs + (nowMs - pb.startedAt) : pb.viewMs;
-      const next = cur + e.deltaY * msPerPx;
+      const next = cur + e.deltaY * getMsPerPx();
       if (next >= nowMs) {
         pausedMaxMsRef.current = null;
         playbackRef.current = { mode: "live", viewMs: nowMs, startedAt: 0 };
@@ -800,7 +850,7 @@ export default function App() {
       if (!dragRef.current) return;
       const nowMs = performance.now() - startRef.current;
       const dy = e.clientY - dragRef.current.startY;
-      playbackRef.current.viewMs = Math.max(TIME_WINDOW, Math.min(dragRef.current.startViewMs + dy * msPerPx * 3, nowMs));
+      playbackRef.current.viewMs = Math.max(0, Math.min(dragRef.current.startViewMs + dy * getMsPerPx() * 3, nowMs));
     };
     const onMouseUp = () => { dragRef.current = null; };
     canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -864,12 +914,6 @@ export default function App() {
     { id: "KEY7", label: "7", black: false },
   ];
 
-  // オフセット色
-  const offsetColor = scrInfo.offsetMs === null ? "text-muted-foreground"
-    : Math.abs(scrInfo.offsetMs) < 20 ? "text-green-400"
-    : Math.abs(scrInfo.offsetMs) < 50 ? "text-yellow-400"
-    : "text-red-400";
-
   return (
     <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4">
 
@@ -924,9 +968,56 @@ export default function App() {
         <div className="flex flex-col gap-2 shrink-0">
         <Card className="h-fit">
           <CardHeader className="pb-2 pt-3 px-3">
-            <CardTitle className="text-xs text-muted-foreground">グリッド</CardTitle>
+            <CardTitle className="text-xs text-muted-foreground">設定</CardTitle>
           </CardHeader>
           <CardContent className="px-3 pb-3 flex flex-col gap-2">
+            {/* 1P / 2P */}
+            <RadioGroup
+              value={side}
+              onValueChange={(v) => {
+                const s = v as "1P" | "2P";
+                setSide(s); sideRef.current = s;
+                localStorage.setItem(SIDE_KEY, s);
+              }}
+              className="flex gap-3"
+            >
+              {(["1P", "2P"] as const).map(s => (
+                <div key={s} className="flex items-center gap-2">
+                  <RadioGroupItem value={s} id={`side-${s}`} />
+                  <Label htmlFor={`side-${s}`} className="text-xs cursor-pointer">{s}</Label>
+                </div>
+              ))}
+            </RadioGroup>
+
+            {/* 緑数字 */}
+            <div className="flex items-center gap-2 border-t border-border pt-2">
+              <input
+                type="number"
+                min={100} max={999}
+                value={greenNumText}
+                onChange={e => {
+                  setGreenNumText(e.target.value);
+                  const v = parseInt(e.target.value);
+                  if (!isNaN(v) && v >= 100 && v <= 999) {
+                    setGreenNum(v); greenNumRef.current = v;
+                    localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(v));
+                  }
+                }}
+                onBlur={e => {
+                  const v = parseInt(e.target.value);
+                  const resolved = (!isNaN(v) && v >= 100 && v <= 999) ? v : GREEN_NUM_DEFAULT;
+                  setGreenNum(resolved); greenNumRef.current = resolved;
+                  setGreenNumText(String(resolved));
+                  localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(resolved));
+                }}
+                className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
+              />
+              <span className="text-xs text-muted-foreground">緑数字</span>
+            </div>
+
+            <div className="border-t border-border pt-2">
+              <span className="text-xs text-muted-foreground">グリッド</span>
+            </div>
             <RadioGroup
               value={gridMode}
               onValueChange={(v) => {
@@ -940,7 +1031,7 @@ export default function App() {
                 <div key={m} className="flex items-center gap-2">
                   <RadioGroupItem value={m} id={`grid-${m}`} />
                   <Label htmlFor={`grid-${m}`} className="text-xs cursor-pointer">
-                    {m === "time" ? "時間" : m === "bpm" ? "BPM" : "SCR基点"}
+                    {m === "time" ? "時間" : m === "bpm" ? "BPM" : "Scratch基点"}
                   </Label>
                 </div>
               ))}
@@ -948,16 +1039,27 @@ export default function App() {
 
             {(gridMode === "bpm" || gridMode === "scr") && (
               <div className="flex flex-col gap-3 mt-1 border-t border-border pt-2">
-                <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
                   <input
                     type="number"
                     min={1} max={999}
-                    value={bpm}
+                    value={bpmText}
                     onChange={e => {
-                      const v = Math.max(1, Math.min(999, Number(e.target.value)));
-                      setBpm(v); bpmRef.current = v;
+                      setBpmText(e.target.value);
+                      const v = parseInt(e.target.value);
+                      if (!isNaN(v) && v >= 1 && v <= 999) {
+                        setBpm(v); bpmRef.current = v;
+                        metroNextBeatRef.current = null;
+                        localStorage.setItem(BPM_STORAGE_KEY, String(v));
+                      }
+                    }}
+                    onBlur={e => {
+                      const v = parseInt(e.target.value);
+                      const resolved = (!isNaN(v) && v >= 1 && v <= 999) ? v : 150;
+                      setBpm(resolved); bpmRef.current = resolved;
+                      setBpmText(String(resolved));
                       metroNextBeatRef.current = null;
-                      localStorage.setItem(BPM_STORAGE_KEY, String(v));
+                      localStorage.setItem(BPM_STORAGE_KEY, String(resolved));
                     }}
                     className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
                   />
@@ -1022,11 +1124,11 @@ export default function App() {
         {/* SCR 情報パネル */}
         <Card className="h-fit min-w-24">
           <CardHeader className="pb-2 pt-3 px-3">
-            <CardTitle className="text-xs text-muted-foreground">SCR情報</CardTitle>
+            <CardTitle className="text-xs text-muted-foreground">Scratch Info</CardTitle>
           </CardHeader>
           <CardContent className="px-3 pb-3 flex flex-col gap-2">
             <div className="flex flex-col gap-0.5">
-              <span className="text-[10px] text-muted-foreground">枚数</span>
+              <span className="text-[10px] text-muted-foreground">連続枚数</span>
               <span className={`text-right text-lg font-bold tabular-nums ${scrInfo.count > 0 ? "text-yellow-300" : "text-muted"}`}>
                 {scrInfo.count > 0 ? scrInfo.count : "—"}
               </span>
@@ -1043,30 +1145,11 @@ export default function App() {
                 {scrInfo.noteDivision ?? "—"}
               </span>
             </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[10px] text-muted-foreground">推定BPM</span>
-              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-cyan-300" : "text-cyan-800"}`}>
-                {scrInfo.estimatedBpm ?? "—"}
-              </span>
-            </div>
-            {(gridMode === "bpm" || gridMode === "scr") && (
-              <div className="flex flex-col gap-0.5">
-                <span className="text-[10px] text-muted-foreground">ズレ</span>
-                <span className={`text-right text-sm tabular-nums ${scrActive ? offsetColor : "text-zinc-500"}`}>
-                  {scrInfo.offsetMs !== null
-                    ? `${scrInfo.offsetMs >= 0 ? "+" : ""}${scrInfo.offsetMs}ms`
-                    : "—"}
-                </span>
-              </div>
-            )}
           </CardContent>
         </Card>
         </div>
       </div>
 
-      {channelCount === 0 && (
-        <p className="text-muted-foreground text-sm">入力を待っています…</p>
-      )}
 
       {/* 棒グラフ (Canvas) */}
       <Card className="w-fit">
@@ -1086,7 +1169,7 @@ export default function App() {
                 const intervals = intervalHistoryRef.current;
                 if (intervals.length === 0) return;
                 const plotW = CHART_W - CHART_PAD_L;
-                const barW = Math.max(2, Math.min(10, Math.floor(plotW / intervals.length)));
+                const barW = Math.max(1, Math.min(10, Math.floor(plotW / intervals.length)));
                 const barIdx = Math.floor((x - CHART_PAD_L) / barW);
                 if (barIdx >= 0 && barIdx < intervals.length) {
                   const entry = intervals[barIdx];
@@ -1127,7 +1210,7 @@ export default function App() {
             </DialogTitle>
           </DialogHeader>
 
-          <div className="flex items-center gap-3 mt-2 justify-center">
+          <div className={`flex items-center gap-3 mt-2 justify-center ${side === "2P" ? "flex-row-reverse" : ""}`}>
             {/* スクラッチ円 */}
             <div className="flex flex-col items-center gap-1">
               <div className="w-[164px] h-[164px] rounded-full overflow-hidden border-2 border-border flex shrink-0">
