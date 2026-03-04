@@ -663,8 +663,11 @@ export default function App() {
           localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
-          intervalHistoryRef.current = [];
-          challengeBarStartIdx.current = 0;
+          if (challengeStateRef.current !== "running") {
+            intervalHistoryRef.current = [];
+            challengeBarStartIdx.current = 0;
+            challengeBarEndIdx.current = 0;
+          }
         }
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
