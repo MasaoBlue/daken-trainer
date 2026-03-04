@@ -543,6 +543,8 @@ export default function App() {
   const intervalHistoryRef = useRef<IntervalEntry[]>([]);
   const chartCanvasRef = useRef<HTMLCanvasElement>(null);
   const chartCtxRef    = useRef<CanvasRenderingContext2D | null>(null);
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartWidthRef = useRef(CHART_W);
   const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry; idx: number } | null>(null);
 
   // キーコンフィグ
@@ -690,6 +692,24 @@ export default function App() {
       audioCtxRef.current = ac;
       if (ac.state === "suspended") ac.resume();
     }
+    // 棒グラフコンテナの幅を監視
+    const container = chartContainerRef.current;
+    if (container) {
+      const ro = new ResizeObserver((entries) => {
+        const w = Math.floor(entries[0].contentRect.width);
+        if (w > 0 && w !== chartWidthRef.current) {
+          chartWidthRef.current = w;
+          if (chartCanvasRef.current) {
+            chartCanvasRef.current.width = w;
+            if (chartCtxRef.current) {
+              drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, w, CHART_H);
+            }
+          }
+        }
+      });
+      ro.observe(container);
+      return () => ro.disconnect();
+    }
   }, []);
 
   // kind: "beat1"=1拍目, "beat234"=2〜4拍目, "eighth"=8分裏
@@ -807,7 +827,7 @@ export default function App() {
           greenNumRef.current * 1000 / 600);
       }
       if (chartCtxRef.current) {
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, CHART_W, CHART_H);
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H);
       }
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -917,7 +937,7 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4">
+    <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4 items-center">
 
       {/* 操作ボタン */}
       <div className="flex gap-2 items-center">
@@ -1151,12 +1171,12 @@ export default function App() {
 
 
       {/* 棒グラフ (Canvas) */}
-      <Card className="w-fit">
+      <Card className="w-full">
         <CardHeader className="pb-1 pt-3 px-3">
           <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
         </CardHeader>
-        <CardContent className="px-3 pb-3">
-          <div className="relative inline-block">
+        <CardContent className="px-3 pb-3" ref={chartContainerRef}>
+          <div className="relative">
             <canvas
               ref={chartCanvasRef}
               width={CHART_W}
@@ -1165,9 +1185,10 @@ export default function App() {
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const x = e.clientX - rect.left;
+                const cw = chartWidthRef.current;
                 const intervals = intervalHistoryRef.current;
                 if (intervals.length === 0) return;
-                const plotW = CHART_W - CHART_PAD_L;
+                const plotW = cw - CHART_PAD_L;
                 const barW = Math.max(1, Math.min(10, Math.floor(plotW / intervals.length)));
                 const barIdx = Math.floor((x - CHART_PAD_L) / barW);
                 if (barIdx >= 0 && barIdx < intervals.length) {
