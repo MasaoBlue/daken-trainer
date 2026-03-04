@@ -136,6 +136,7 @@ function drawTimeline(
   scrLastInputMs: number,
   laneDefs: LaneDef[],
   timeWindow: number,
+  challengeRange: { startMs: number; endMs: number } | null,
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
   ctx.fillStyle = "#111";
@@ -268,6 +269,31 @@ function drawTimeline(
   }
   ctx.restore();
 
+  // チャレンジ範囲インジケータ（SCRレーンの左端に表示）
+  if (challengeRange) {
+    const BODY_BOTTOM = CANVAS_H - 1;
+    const msPerPx = timeWindow / (BODY_BOTTOM - HEADER_H);
+    const crToY = (t: number) => HEADER_H + (viewNowMs - t) / msPerPx;
+    const yStart = crToY(challengeRange.startMs);
+    const yEnd   = crToY(challengeRange.endMs);
+    const clampTop    = Math.max(HEADER_H, Math.min(yEnd, yStart));
+    const clampBottom = Math.min(BODY_BOTTOM, Math.max(yEnd, yStart));
+    if (clampBottom > HEADER_H && clampTop < BODY_BOTTOM) {
+      // SCRレーンの位置を取得
+      let scrX = 0;
+      const scrLane = laneDefs.find(l => l.id === "SCR");
+      for (const lane of laneDefs) {
+        if (lane.id === "SCR") break;
+        scrX += lane.w;
+      }
+      const scrRight = laneDefs[laneDefs.length - 1].id === "SCR";
+      const lx = scrRight ? scrX + (scrLane?.w ?? 0) - 4 : scrX + 1;
+      ctx.fillStyle = "#0cf";
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(lx, clampTop, 3, clampBottom - clampTop);
+      ctx.globalAlpha = 1.0;
+    }
+  }
 }
 
 // ---- 棒グラフ Canvas 描画 ---------------------------------------------------
@@ -283,6 +309,7 @@ function drawBarChart(
   bpm: number,
   w: number,
   h: number,
+  challengeBarRange: { startIdx: number; endIdx: number } | null,
 ) {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#111";
@@ -332,34 +359,33 @@ function drawBarChart(
   // バーが足りない場合は左詰め（右にスペースが余る）
   // バーが多い場合は右端まで使う（INTERVAL_HISTORY以上になることはないが念のため）
 
-  // Y軸リファレンスライン（ラベルは左側）
+  // Y軸リファレンスライン（ラベル付きのみ描画）
   for (const { d, ms } of noteRefMs) {
     if (ms <= 0) continue;
+    const isLabeled = LABELED_DIVS.has(d);
+    if (!isLabeled) continue;
     const y = msToY(ms);
     if (y < PAD_T || y > PAD_T + plotH) continue;
-    const isLabeled = LABELED_DIVS.has(d);
     const color = NOTE_COLOR(d);
     // ライン（バー描画エリアのみ）
     ctx.strokeStyle = color;
-    ctx.globalAlpha = isLabeled ? 0.75 : 0.25;
-    ctx.setLineDash(isLabeled ? [4, 3] : [2, 5]);
+    ctx.globalAlpha = 0.75;
+    ctx.setLineDash([4, 3]);
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
     ctx.globalAlpha = 1.0;
     ctx.setLineDash([]);
     // ラベル（左側）- アウトライン付きで視認性向上
-    if (isLabeled) {
-      ctx.font = "bold 11px monospace";
-      ctx.textAlign = "right";
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 4;
-      ctx.lineJoin = "round";
-      ctx.strokeText(`${d}`, plotX - 6, y + 4);
-      ctx.fillStyle = color;
-      ctx.fillText(`${d}`, plotX - 6, y + 4);
-      ctx.textAlign = "left";
-      ctx.lineJoin = "miter";
-    }
+    ctx.font = "bold 11px monospace";
+    ctx.textAlign = "right";
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 4;
+    ctx.lineJoin = "round";
+    ctx.strokeText(`${d}`, plotX - 6, y + 4);
+    ctx.fillStyle = color;
+    ctx.fillText(`${d}`, plotX - 6, y + 4);
+    ctx.textAlign = "left";
+    ctx.lineJoin = "miter";
   }
 
   if (count === 0) return;
@@ -386,8 +412,8 @@ function drawBarChart(
     const dirColor = dir > 0 ? "#4f8" : "#fa4";
 
     const bx = x, bw = barW - 1;
-    if (i === 0) {
-      // 1本目: 縦幅100%・軸線
+    if (ms === 0) {
+      // 1枚目（intervalなし）: 縦幅100%・方向色のみ
       ctx.fillStyle = dirColor;
       ctx.globalAlpha = 0.6;
       ctx.fillRect(bx, PAD_T, bw, plotH);
@@ -402,7 +428,7 @@ function drawBarChart(
   }
 
   // X軸ラベル（枚数）: 100以下は1,10,20...50、100超えは50単位
-  ctx.fillStyle = "#666";
+  ctx.fillStyle = "#aaa";
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
   const tickStep = count > 100 ? 50 : 10;
@@ -417,6 +443,21 @@ function drawBarChart(
     ctx.beginPath(); ctx.moveTo(x, PAD_T + plotH); ctx.lineTo(x, PAD_T + plotH + 3); ctx.stroke();
     ctx.fillText(String(n), x, h - 2);
   }
+
+  // チャレンジ範囲インジケータ（棒の下端に横線）
+  if (challengeBarRange && count > 0 && challengeBarRange.endIdx > challengeBarRange.startIdx) {
+    const si = Math.max(0, challengeBarRange.startIdx);
+    const ei = Math.min(count, challengeBarRange.endIdx);
+    if (ei > si) {
+      const x1 = plotX + si * barW;
+      const x2 = plotX + (ei - 1) * barW + barW;
+      const ly = PAD_T + plotH - 1;
+      ctx.fillStyle = "#0cf";
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(x1, ly, x2 - x1, 2);
+      ctx.globalAlpha = 1.0;
+    }
+  }
 }
 
 // ---- 音符区分ヘルパー -------------------------------------------------------
@@ -430,7 +471,7 @@ function nearestNoteDivision(intervalMs: number, bpm: number): string {
     const diff = Math.abs(intervalMs - noteMs);
     if (diff < bestDiff) { bestDiff = diff; best = d; }
   }
-  return `${best}分`;
+  return `${best}分相当`;
 }
 
 // ---- メインコンポーネント --------------------------------------------------
@@ -544,7 +585,28 @@ export default function App() {
   const intervalHistoryRef = useRef<IntervalEntry[]>([]);
   const chartCanvasRef = useRef<HTMLCanvasElement>(null);
   const chartCtxRef    = useRef<CanvasRenderingContext2D | null>(null);
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartWidthRef = useRef(CHART_W);
   const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry; idx: number } | null>(null);
+
+  // チャレンジモード
+  type ChallengeState = "idle" | "ready" | "running" | "done";
+  const [challengeState, setChallengeState] = useState<ChallengeState>("idle");
+  const challengeStateRef = useRef<ChallengeState>("idle");
+  const [challengeDuration, setChallengeDuration] = useState(30);
+  const challengeDurationRef = useRef(30);
+  const challengeStartRef = useRef(0);
+  const challengeScrCountRef = useRef(0);
+  const [challengeScrCount, setChallengeScrCount] = useState(0);
+  const [challengeTimeLeft, setChallengeTimeLeft] = useState(0);
+  const challengeIntervalsRef = useRef<IntervalEntry[]>([]);
+  const challengeBarStartIdx = useRef(0);  // チャレンジ開始時のintervalHistory長
+  const challengeBarEndIdx = useRef(0);    // チャレンジ終了時のintervalHistory長
+  const challengeEndRef = useRef(0);       // チャレンジ終了時刻(nowMs)
+  const [challengeResult, setChallengeResult] = useState<{
+    count: number; duration: number; avgMs: number | null;
+    noteDivision: string | null;
+  } | null>(null);
 
   // キーコンフィグ
   const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
@@ -601,25 +663,58 @@ export default function App() {
           localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
-          intervalHistoryRef.current = [];
+          if (challengeStateRef.current !== "running") {
+            intervalHistoryRef.current = [{ ms: 0, dir }];
+            challengeBarStartIdx.current = 0;
+            challengeBarEndIdx.current = 0;
+          } else {
+            intervalHistoryRef.current = [...intervalHistoryRef.current, { ms: 0, dir }];
+          }
         }
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
         invoke("play_clap").catch(() => {});
+
+        // チャレンジモード: スクラッチカウント
+        const addedDummy = scrCountRef.current === 1; // 659行目でダミーを追加した直後
+        if (challengeStateRef.current === "ready") {
+          challengeStateRef.current = "running";
+          setChallengeState("running");
+          challengeStartRef.current = nowJs;
+          challengeScrCountRef.current = 1;
+          setChallengeScrCount(1);
+          challengeIntervalsRef.current = [];
+          // ダミーエントリ(ms:0)がある場合はそれを含めた位置から開始
+          challengeBarStartIdx.current = addedDummy
+            ? intervalHistoryRef.current.length - 1
+            : intervalHistoryRef.current.length;
+        } else if (challengeStateRef.current === "running") {
+          challengeScrCountRef.current += 1;
+          setChallengeScrCount(challengeScrCountRef.current);
+        }
 
         let intervalMs: number | null = null;
         let estimatedBpm: number | null = null;
         let offsetMs: number | null = null;
         let noteDivision: string | null = null;
 
-        if (scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
+        if (scrCountRef.current >= 2 && scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
           intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
 
           // 棒グラフ履歴を更新
+          const prevLen = intervalHistoryRef.current.length;
           intervalHistoryRef.current = [
             ...intervalHistoryRef.current.slice(-(INTERVAL_HISTORY - 1)),
             { ms: intervalMs, dir },
           ];
+          const removed = prevLen - (intervalHistoryRef.current.length - 1);
+          if (removed > 0) {
+            challengeBarStartIdx.current = Math.max(0, challengeBarStartIdx.current - removed);
+          }
+          // チャレンジモード: インターバル記録
+          if (challengeStateRef.current === "running") {
+            challengeIntervalsRef.current.push({ ms: intervalMs, dir });
+          }
 
           const elapsedMs = nowJs - scrOriginRef.current;
           if (elapsedMs > 0 && scrCountRef.current >= 2) {
@@ -690,6 +785,30 @@ export default function App() {
       const ac = new AudioContext();
       audioCtxRef.current = ac;
       if (ac.state === "suspended") ac.resume();
+    }
+    // 棒グラフコンテナの幅を監視
+    const container = chartContainerRef.current;
+    if (container) {
+      const ro = new ResizeObserver((entries) => {
+        const w = Math.floor(entries[0].contentRect.width);
+        if (w > 0 && w !== chartWidthRef.current) {
+          chartWidthRef.current = w;
+          if (chartCanvasRef.current) {
+            chartCanvasRef.current.width = w;
+            if (chartCtxRef.current) {
+              const cs = challengeStateRef.current;
+              const cbr = cs === "running"
+                ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
+                : cs === "done"
+                ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
+                : null;
+              drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, w, CHART_H, cbr);
+            }
+          }
+        }
+      });
+      ro.observe(container);
+      return () => ro.disconnect();
     }
   }, []);
 
@@ -802,13 +921,48 @@ export default function App() {
         const orderedLanes = sideRef.current === "2P"
           ? [...LANE_DEFS.filter(l => l.id !== "SCR"), LANE_DEFS.find(l => l.id === "SCR")!]
           : LANE_DEFS;
+        const crs = challengeStateRef.current;
+        const cRange = crs === "running"
+          ? { startMs: challengeStartRef.current, endMs: nowMs }
+          : crs === "done"
+          ? { startMs: challengeStartRef.current, endMs: challengeEndRef.current }
+          : null;
         drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
           canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
           scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
-          greenNumRef.current * 1000 / 600);
+          greenNumRef.current * 1000 / 600, cRange);
       }
       if (chartCtxRef.current) {
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, CHART_W, CHART_H);
+        const cs = challengeStateRef.current;
+        const cBarRange = cs === "running"
+          ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
+          : cs === "done"
+          ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
+          : null;
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H, cBarRange);
+      }
+      // チャレンジモード: タイマー更新
+      if (challengeStateRef.current === "running") {
+        const elapsed = (nowMs - challengeStartRef.current) / 1000;
+        const remaining = challengeDurationRef.current - elapsed;
+        if (remaining <= 0) {
+          challengeStateRef.current = "done";
+          setChallengeState("done");
+          setChallengeTimeLeft(0);
+          challengeEndRef.current = challengeStartRef.current + challengeDurationRef.current * 1000;
+          challengeBarEndIdx.current = intervalHistoryRef.current.length;
+          const intervals = challengeIntervalsRef.current;
+          const avgMs = intervals.length > 0
+            ? Math.round(intervals.reduce((s, e) => s + e.ms, 0) / intervals.length)
+            : null;
+          const nd = avgMs !== null && bpmRef.current > 0
+            ? nearestNoteDivision(avgMs, bpmRef.current) : null;
+          const cnt = challengeScrCountRef.current;
+          const dur = challengeDurationRef.current;
+          setChallengeResult({ count: cnt, duration: dur, avgMs, noteDivision: nd });
+        } else {
+          setChallengeTimeLeft(remaining);
+        }
       }
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -918,7 +1072,7 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4">
+    <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4 items-center">
 
       {/* 操作ボタン */}
       <div className="flex gap-2 items-center">
@@ -945,8 +1099,140 @@ export default function App() {
         </Button>
       </div>
 
-      {/* メイン行: canvas + スライダー + 設定パネル */}
+      {/* メイン行: チャレンジ + canvas + スライダー + 設定パネル */}
       <div className="flex items-start gap-2 overflow-x-auto">
+
+        {/* チャレンジモード */}
+        <Card className={`h-fit shrink-0 w-[160px] ${challengeState === "running" ? "border-orange-500/50 shadow-[0_0_8px_rgba(255,165,0,0.2)]" : ""}`}>
+          <CardHeader className="pb-2 pt-3 px-3">
+            <CardTitle className="text-xs text-muted-foreground">Challenge</CardTitle>
+          </CardHeader>
+          <CardContent className="px-3 pb-3 flex flex-col gap-2 items-center">
+            {/* 時間選択ボタン */}
+            <div className="grid grid-cols-3 gap-1 w-full">
+              {([1, 5, 10, 20, 30, 60] as const).map(d => (
+                <Button
+                  key={d}
+                  size="sm"
+                  variant={challengeState !== "idle" && challengeDuration === d && challengeState !== "done" ? "default" : "outline"}
+                  className={`text-xs px-1 h-7 ${challengeState === "done" && challengeDuration === d ? "border-primary text-primary" : ""}`}
+                  disabled={challengeState === "running"}
+                  onClick={() => {
+                    setChallengeDuration(d);
+                    challengeDurationRef.current = d;
+                    challengeStateRef.current = "ready";
+                    setChallengeState("ready");
+                    challengeScrCountRef.current = 0;
+                    setChallengeScrCount(0);
+                    setChallengeResult(null);
+                  }}
+                >
+                  {d === 60 ? "1m" : `${d}s`}
+                </Button>
+              ))}
+            </div>
+
+            {/* タイマー表示 */}
+            <div className={`font-mono text-3xl font-bold tabular-nums text-center w-full ${
+              challengeState === "running" ? "text-orange-400"
+                : challengeState === "ready" ? "text-zinc-500"
+                : challengeState === "done" ? "text-zinc-500"
+                : "text-zinc-700"
+            }`}>
+              {challengeState === "running"
+                ? challengeTimeLeft.toFixed(2)
+                : challengeState === "ready"
+                ? `${challengeDuration}.00`
+                : challengeState === "done"
+                ? "0.00"
+                : "0.00"}
+            </div>
+
+            {/* スクラッチ回数 */}
+            <div className="text-center w-full">
+              <span className="text-[10px] text-muted-foreground">Scratches</span>
+              <div className={`font-mono text-3xl font-bold tabular-nums ${
+                challengeState === "running" ? "text-yellow-300"
+                  : challengeState === "done" ? "text-yellow-300"
+                  : "text-zinc-700"
+              }`}>
+                {challengeState === "running"
+                  ? challengeScrCount
+                  : challengeState === "done" && challengeResult
+                  ? challengeResult.count
+                  : "—"}
+              </div>
+            </div>
+
+            {/* READY: スクラッチで開始プロンプト */}
+            {challengeState === "ready" && (
+              <>
+                <span className="text-xs text-muted-foreground animate-pulse">
+                  スクラッチで開始
+                </span>
+                <Button
+                  size="sm" variant="ghost"
+                  className="text-xs"
+                  onClick={() => {
+                    challengeStateRef.current = "idle";
+                    setChallengeState("idle");
+                  }}
+                >
+                  キャンセル
+                </Button>
+              </>
+            )}
+
+            {/* RUNNING: リセットボタン */}
+            {challengeState === "running" && (
+              <Button
+                size="sm" variant="ghost"
+                className="text-xs"
+                onClick={() => {
+                  challengeStateRef.current = "idle";
+                  setChallengeState("idle");
+                  challengeScrCountRef.current = 0;
+                  setChallengeScrCount(0);
+                }}
+              >
+                リセット
+              </Button>
+            )}
+
+            {/* DONE: 結果詳細 */}
+            {challengeState === "done" && challengeResult && (
+              <div className="text-center flex flex-col gap-1 w-full">
+                <div className="text-base font-bold text-green-400">FINISH!</div>
+                {challengeResult.avgMs !== null && (
+                  <div className="flex flex-col gap-0">
+                    <span className="text-xs text-zinc-400">
+                      Avg: {challengeResult.avgMs}ms
+                    </span>
+                    {challengeResult.noteDivision && (
+                      <span className="text-xs text-zinc-500">
+                        (BPM{bpm} {challengeResult.noteDivision})
+                      </span>
+                    )}
+                  </div>
+                )}
+                <a
+                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
+                    `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチしたよ！`
+                    + (challengeResult.avgMs !== null
+                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? ` (BPM${bpm} ${challengeResult.noteDivision})` : "")
+                      : "")
+                    + "\n#daken_trainer"
+                  )}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 inline-flex items-center justify-center gap-1 text-xs px-3 py-1.5 rounded border border-border text-muted-foreground hover:text-foreground hover:border-zinc-500 transition-colors"
+                >
+                  Share on 𝕏
+                </a>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Canvas */}
         <canvas
@@ -1152,12 +1438,12 @@ export default function App() {
 
 
       {/* 棒グラフ (Canvas) */}
-      <Card className="w-fit">
+      <Card className="w-full">
         <CardHeader className="pb-1 pt-3 px-3">
           <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
         </CardHeader>
-        <CardContent className="px-3 pb-3">
-          <div className="relative inline-block">
+        <CardContent className="px-3 pb-3" ref={chartContainerRef}>
+          <div className="relative">
             <canvas
               ref={chartCanvasRef}
               width={CHART_W}
@@ -1166,9 +1452,10 @@ export default function App() {
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const x = e.clientX - rect.left;
+                const cw = chartWidthRef.current;
                 const intervals = intervalHistoryRef.current;
                 if (intervals.length === 0) return;
-                const plotW = CHART_W - CHART_PAD_L;
+                const plotW = cw - CHART_PAD_L;
                 const barW = Math.max(1, Math.min(10, Math.floor(plotW / intervals.length)));
                 const barIdx = Math.floor((x - CHART_PAD_L) / barW);
                 if (barIdx >= 0 && barIdx < intervals.length) {
