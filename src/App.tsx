@@ -51,8 +51,8 @@ const GREEN_NUM_DEFAULT     = 1000;
 const AXIS_TIMEOUT      = 150;
 const SCR_RESET_MS      = 500;
 const SPAN_RETAIN       = 600000;
-const INTERVAL_HISTORY  = 200; // 棒グラフに表示する直近N枚分
-const CHART_W           = 570; // 棒グラフ固定幅 (px)
+const CHART_BAR_W       = 10;  // 棒グラフ1本の固定幅 (px)
+const CHART_W           = 570; // 棒グラフ最小幅 (px)
 const CHART_H           = 160; // 棒グラフ固定高さ (px)
 
 // ---- ストレージキー ---------------------------------------------------------
@@ -65,6 +65,7 @@ const METRO_ON_KEY           = "daken-trainer-metro-on";
 const METRO_DIV_KEY          = "daken-trainer-metro-div";
 const METRO_VOL_KEY          = "daken-trainer-metro-vol";
 const SIDE_KEY               = "daken-trainer-side";
+const CLAP_ON_KEY            = "daken-trainer-clap-on";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
 
@@ -352,12 +353,8 @@ function drawBarChart(
     return PAD_T + Math.round(ratio * plotH); // ratioが大きい(遅い)ほど下
   };
 
-  // バー幅: intervals数に応じて可変、最小2px、最大10px
-  // 右端が最新。左から並べ、足りない分は右端まで詰めない（左余白なし、左から順に配置）
   const count = intervals.length;
-  const barW = count > 0 ? Math.max(1, Math.min(10, Math.floor(plotW / count))) : 8;
-  // バーが足りない場合は左詰め（右にスペースが余る）
-  // バーが多い場合は右端まで使う（INTERVAL_HISTORY以上になることはないが念のため）
+  const barW = CHART_BAR_W;
 
   // Y軸リファレンスライン（ラベル付きのみ描画）
   for (const { d, ms } of noteRefMs) {
@@ -397,10 +394,9 @@ function drawBarChart(
   for (let i = 0; i < count; i++) {
     const { ms, dir } = intervals[i];
     const x = plotX + i * barW;
-    const yTop = Math.max(PAD_T, msToY(ms));
     const yBottom = PAD_T + plotH;
+    const yTop = Math.min(Math.max(PAD_T, msToY(ms)), yBottom - DIR_INDICATOR_H);
     const barH = yBottom - yTop;
-    if (barH <= 0) continue;
 
     // 縦グラデーション: 下=グレー(4分/遅い) → 上(バー先端)=赤系(32分に近いほど赤)
     const barDiv = Math.max(4, Math.min(32,
@@ -431,7 +427,7 @@ function drawBarChart(
   ctx.fillStyle = "#aaa";
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
-  const tickStep = count > 100 ? 50 : 10;
+  const tickStep = 10;
   const tickList = [1];
   for (let n = tickStep; n <= count; n += tickStep) tickList.push(n);
   for (const n of tickList) {
@@ -531,6 +527,12 @@ export default function App() {
     return String(isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v)));
   });
 
+  // クラップ音
+  const [clapOn, setClapOn] = useState(() => localStorage.getItem(CLAP_ON_KEY) !== "0");
+  const clapOnRef = useRef(localStorage.getItem(CLAP_ON_KEY) !== "0");
+  const clapLastDirRef = useRef(0);
+  const clapLastTimeRef = useRef(-Infinity);
+
   // メトロノーム
   const [metroOn, setMetroOn] = useState(() => localStorage.getItem(METRO_ON_KEY) === "1");
   const metroOnRef = useRef(localStorage.getItem(METRO_ON_KEY) === "1");
@@ -560,6 +562,7 @@ export default function App() {
   const scrCountRef     = useRef(0);
   const scrLastTimeRef  = useRef<number>(-Infinity);
   const scrLastDirRef   = useRef<number>(0);
+  const scrLastEventTimeRef = useRef<number>(-Infinity); // SCRイベント毎に更新（カウント関係なく）
 
   interface ScrInfo {
     count: number;
@@ -650,9 +653,25 @@ export default function App() {
       const resolved = resolveChannel(keyConfigRef.current, ev);
       if (resolved === null) return;
 
+      // クラップ音: 方向変化 or 一定時間途切れた後に鳴らす
+      const maybePlayClap = (dir: number, t: number) => {
+        if (!clapOnRef.current) return;
+        if (dir !== clapLastDirRef.current || t - clapLastTimeRef.current > 100) {
+          invoke("play_clap").catch(() => {});
+          clapLastDirRef.current = dir;
+        }
+        clapLastTimeRef.current = t;
+      };
+
       // SCR 方向変化処理（ButtonDown / AxisMove 共通）
+      // 同じ方向の入力: 最後のイベントから100ms以上途切れたら別入力とみなす
       const handleScrDirectionChange = (dir: number) => {
-        if (dir === scrLastDirRef.current) return;
+        const isSameDir = dir === scrLastDirRef.current;
+        if (isSameDir && nowJs - scrLastEventTimeRef.current < 100) {
+          scrLastEventTimeRef.current = nowJs;
+          return;
+        }
+        scrLastEventTimeRef.current = nowJs;
         scrLastDirRef.current = dir;
         const prevTime = scrLastTimeRef.current;
         scrLastTimeRef.current = nowJs;
@@ -673,7 +692,6 @@ export default function App() {
         }
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
-        invoke("play_clap").catch(() => {});
 
         // チャレンジモード: スクラッチカウント
         const addedDummy = scrCountRef.current === 1; // 659行目でダミーを追加した直後
@@ -702,15 +720,10 @@ export default function App() {
           intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
 
           // 棒グラフ履歴を更新
-          const prevLen = intervalHistoryRef.current.length;
           intervalHistoryRef.current = [
-            ...intervalHistoryRef.current.slice(-(INTERVAL_HISTORY - 1)),
+            ...intervalHistoryRef.current,
             { ms: intervalMs, dir },
           ];
-          const removed = prevLen - (intervalHistoryRef.current.length - 1);
-          if (removed > 0) {
-            challengeBarStartIdx.current = Math.max(0, challengeBarStartIdx.current - removed);
-          }
           // チャレンジモード: インターバル記録
           if (challengeStateRef.current === "running") {
             challengeIntervalsRef.current.push({ ms: intervalMs, dir });
@@ -751,6 +764,7 @@ export default function App() {
           ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
         }
         if (resolved.laneId === "SCR" && resolved.direction !== undefined) {
+          if (clapOnRef.current) invoke("play_clap").catch(() => {});
           handleScrDirectionChange(resolved.direction);
         }
       } else if (ev.kind === "ButtonUp") {
@@ -772,7 +786,10 @@ export default function App() {
           last.end = nowJs;
           ch.spans.push({ start: nowJs, end: null, direction: dir });
         }
-        if (resolved.laneId === "SCR") handleScrDirectionChange(dir);
+        if (resolved.laneId === "SCR") {
+          maybePlayClap(dir, nowJs);
+          handleScrDirectionChange(dir);
+        }
       }
     });
     return () => { unlisten.then((f) => f()); };
@@ -793,17 +810,17 @@ export default function App() {
         const w = Math.floor(entries[0].contentRect.width);
         if (w > 0 && w !== chartWidthRef.current) {
           chartWidthRef.current = w;
-          if (chartCanvasRef.current) {
-            chartCanvasRef.current.width = w;
-            if (chartCtxRef.current) {
-              const cs = challengeStateRef.current;
-              const cbr = cs === "running"
-                ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
-                : cs === "done"
-                ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
-                : null;
-              drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, w, CHART_H, cbr);
-            }
+          if (chartCanvasRef.current && chartCtxRef.current) {
+            const neededW = CHART_PAD_L + intervalHistoryRef.current.length * CHART_BAR_W;
+            const cw = Math.max(w, neededW);
+            chartCanvasRef.current.width = cw;
+            const cs = challengeStateRef.current;
+            const cbr = cs === "running"
+              ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
+              : cs === "done"
+              ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
+              : null;
+            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr);
           }
         }
       });
@@ -882,6 +899,7 @@ export default function App() {
       if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > SCR_RESET_MS) {
         scrCountRef.current = 0;
         scrLastDirRef.current = 0;
+        scrLastEventTimeRef.current = -Infinity;
         scrOriginRef.current = -Infinity;
         scrPrevDirTimeRef.current = null;
         scrIntervalHistRef.current = [];
@@ -932,14 +950,24 @@ export default function App() {
           scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
           greenNumRef.current * 1000 / 600, cRange);
       }
-      if (chartCtxRef.current) {
+      if (chartCtxRef.current && chartCanvasRef.current) {
         const cs = challengeStateRef.current;
         const cBarRange = cs === "running"
           ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
           : cs === "done"
           ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
           : null;
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H, cBarRange);
+        // キャンバス幅をバー数に応じて拡張（コンテナ幅以上にする）
+        const neededW = CHART_PAD_L + intervalHistoryRef.current.length * CHART_BAR_W;
+        const cw = Math.max(chartWidthRef.current, neededW);
+        if (chartCanvasRef.current.width !== cw) {
+          chartCanvasRef.current.width = cw;
+          // 右端に自動スクロール
+          if (chartContainerRef.current) {
+            chartContainerRef.current.scrollLeft = chartContainerRef.current.scrollWidth;
+          }
+        }
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange);
       }
       // チャレンジモード: タイマー更新
       if (challengeStateRef.current === "running") {
@@ -1254,7 +1282,7 @@ export default function App() {
         />
 
         {/* グリッド + メトロノーム設定 + SCR情報 */}
-        <div className="flex flex-col gap-2 shrink-0">
+        <div className="flex flex-col gap-2 shrink-0 min-w-[180px]">
         <Card className="h-fit">
           <CardHeader className="pb-2 pt-3 px-3">
             <CardTitle className="text-xs text-muted-foreground">設定</CardTitle>
@@ -1354,6 +1382,22 @@ export default function App() {
               />
             </div>
 
+            {/* クラップ音 */}
+            <div className="flex items-center gap-2 border-t border-border pt-2">
+              <Checkbox
+                id="clap-on"
+                checked={clapOn}
+                onCheckedChange={(checked) => {
+                  const on = !!checked;
+                  setClapOn(on); clapOnRef.current = on;
+                  localStorage.setItem(CLAP_ON_KEY, on ? "1" : "0");
+                }}
+              />
+              <Label htmlFor="clap-on" className={`text-xs cursor-pointer ${clapOn ? "text-primary" : "text-muted-foreground"}`}>
+                クラップ音 {clapOn ? "ON" : "OFF"}
+              </Label>
+            </div>
+
             {/* メトロノーム */}
             <div className="flex flex-col gap-2 border-t border-border pt-2">
               <span className="text-xs text-muted-foreground">メトロノーム</span>
@@ -1442,8 +1486,17 @@ export default function App() {
         <CardHeader className="pb-1 pt-3 px-3">
           <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
         </CardHeader>
-        <CardContent className="px-3 pb-3" ref={chartContainerRef}>
-          <div className="relative">
+        <CardContent className="px-3 pb-3">
+          <div
+            className="relative overflow-x-auto"
+            ref={chartContainerRef}
+            onWheel={(e) => {
+              e.preventDefault();
+              if (chartContainerRef.current) {
+                chartContainerRef.current.scrollLeft += e.deltaY;
+              }
+            }}
+          >
             <canvas
               ref={chartCanvasRef}
               width={CHART_W}
@@ -1452,11 +1505,9 @@ export default function App() {
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const x = e.clientX - rect.left;
-                const cw = chartWidthRef.current;
                 const intervals = intervalHistoryRef.current;
                 if (intervals.length === 0) return;
-                const plotW = cw - CHART_PAD_L;
-                const barW = Math.max(1, Math.min(10, Math.floor(plotW / intervals.length)));
+                const barW = CHART_BAR_W;
                 const barIdx = Math.floor((x - CHART_PAD_L) / barW);
                 if (barIdx >= 0 && barIdx < intervals.length) {
                   const entry = intervals[barIdx];
