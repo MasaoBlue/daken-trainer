@@ -332,34 +332,33 @@ function drawBarChart(
   // バーが足りない場合は左詰め（右にスペースが余る）
   // バーが多い場合は右端まで使う（INTERVAL_HISTORY以上になることはないが念のため）
 
-  // Y軸リファレンスライン（ラベルは左側）
+  // Y軸リファレンスライン（ラベル付きのみ描画）
   for (const { d, ms } of noteRefMs) {
     if (ms <= 0) continue;
+    const isLabeled = LABELED_DIVS.has(d);
+    if (!isLabeled) continue;
     const y = msToY(ms);
     if (y < PAD_T || y > PAD_T + plotH) continue;
-    const isLabeled = LABELED_DIVS.has(d);
     const color = NOTE_COLOR(d);
     // ライン（バー描画エリアのみ）
     ctx.strokeStyle = color;
-    ctx.globalAlpha = isLabeled ? 0.75 : 0.25;
-    ctx.setLineDash(isLabeled ? [4, 3] : [2, 5]);
+    ctx.globalAlpha = 0.75;
+    ctx.setLineDash([4, 3]);
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
     ctx.globalAlpha = 1.0;
     ctx.setLineDash([]);
     // ラベル（左側）- アウトライン付きで視認性向上
-    if (isLabeled) {
-      ctx.font = "bold 11px monospace";
-      ctx.textAlign = "right";
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 4;
-      ctx.lineJoin = "round";
-      ctx.strokeText(`${d}`, plotX - 6, y + 4);
-      ctx.fillStyle = color;
-      ctx.fillText(`${d}`, plotX - 6, y + 4);
-      ctx.textAlign = "left";
-      ctx.lineJoin = "miter";
-    }
+    ctx.font = "bold 11px monospace";
+    ctx.textAlign = "right";
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 4;
+    ctx.lineJoin = "round";
+    ctx.strokeText(`${d}`, plotX - 6, y + 4);
+    ctx.fillStyle = color;
+    ctx.fillText(`${d}`, plotX - 6, y + 4);
+    ctx.textAlign = "left";
+    ctx.lineJoin = "miter";
   }
 
   if (count === 0) return;
