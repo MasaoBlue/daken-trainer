@@ -136,6 +136,7 @@ function drawTimeline(
   scrLastInputMs: number,
   laneDefs: LaneDef[],
   timeWindow: number,
+  challengeRange: { startMs: number; endMs: number } | null,
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
   ctx.fillStyle = "#111";
@@ -268,6 +269,31 @@ function drawTimeline(
   }
   ctx.restore();
 
+  // チャレンジ範囲インジケータ（SCRレーンの左端に表示）
+  if (challengeRange) {
+    const BODY_BOTTOM = CANVAS_H - 1;
+    const msPerPx = timeWindow / (BODY_BOTTOM - HEADER_H);
+    const crToY = (t: number) => HEADER_H + (viewNowMs - t) / msPerPx;
+    const yStart = crToY(challengeRange.startMs);
+    const yEnd   = crToY(challengeRange.endMs);
+    const clampTop    = Math.max(HEADER_H, Math.min(yEnd, yStart));
+    const clampBottom = Math.min(BODY_BOTTOM, Math.max(yEnd, yStart));
+    if (clampBottom > HEADER_H && clampTop < BODY_BOTTOM) {
+      // SCRレーンの位置を取得
+      let scrX = 0;
+      const scrLane = laneDefs.find(l => l.id === "SCR");
+      for (const lane of laneDefs) {
+        if (lane.id === "SCR") break;
+        scrX += lane.w;
+      }
+      const scrRight = laneDefs[laneDefs.length - 1].id === "SCR";
+      const lx = scrRight ? scrX + (scrLane?.w ?? 0) - 4 : scrX + 1;
+      ctx.fillStyle = "#0cf";
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(lx, clampTop, 3, clampBottom - clampTop);
+      ctx.globalAlpha = 1.0;
+    }
+  }
 }
 
 // ---- 棒グラフ Canvas 描画 ---------------------------------------------------
@@ -283,6 +309,7 @@ function drawBarChart(
   bpm: number,
   w: number,
   h: number,
+  challengeBarRange: { startIdx: number; endIdx: number } | null,
 ) {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#111";
@@ -401,7 +428,7 @@ function drawBarChart(
   }
 
   // X軸ラベル（枚数）: 100以下は1,10,20...50、100超えは50単位
-  ctx.fillStyle = "#666";
+  ctx.fillStyle = "#aaa";
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
   const tickStep = count > 100 ? 50 : 10;
@@ -415,6 +442,21 @@ function drawBarChart(
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, PAD_T + plotH); ctx.lineTo(x, PAD_T + plotH + 3); ctx.stroke();
     ctx.fillText(String(n), x, h - 2);
+  }
+
+  // チャレンジ範囲インジケータ（棒の下端に横線）
+  if (challengeBarRange && count > 0 && challengeBarRange.endIdx > challengeBarRange.startIdx) {
+    const si = Math.max(0, challengeBarRange.startIdx);
+    const ei = Math.min(count, challengeBarRange.endIdx);
+    if (ei > si) {
+      const x1 = plotX + si * barW;
+      const x2 = plotX + (ei - 1) * barW + barW;
+      const ly = PAD_T + plotH - 1;
+      ctx.fillStyle = "#0cf";
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(x1, ly, x2 - x1, 2);
+      ctx.globalAlpha = 1.0;
+    }
   }
 }
 
@@ -558,6 +600,9 @@ export default function App() {
   const [challengeScrCount, setChallengeScrCount] = useState(0);
   const [challengeTimeLeft, setChallengeTimeLeft] = useState(0);
   const challengeIntervalsRef = useRef<IntervalEntry[]>([]);
+  const challengeBarStartIdx = useRef(0);  // チャレンジ開始時のintervalHistory長
+  const challengeBarEndIdx = useRef(0);    // チャレンジ終了時のintervalHistory長
+  const challengeEndRef = useRef(0);       // チャレンジ終了時刻(nowMs)
   const [challengeResult, setChallengeResult] = useState<{
     count: number; duration: number; avgMs: number | null;
     noteDivision: string | null;
@@ -619,6 +664,7 @@ export default function App() {
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
           intervalHistoryRef.current = [];
+          challengeBarStartIdx.current = 0;
         }
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
@@ -632,6 +678,7 @@ export default function App() {
           challengeScrCountRef.current = 1;
           setChallengeScrCount(1);
           challengeIntervalsRef.current = [];
+          challengeBarStartIdx.current = intervalHistoryRef.current.length;
         } else if (challengeStateRef.current === "running") {
           challengeScrCountRef.current += 1;
           setChallengeScrCount(challengeScrCountRef.current);
@@ -646,10 +693,15 @@ export default function App() {
           intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
 
           // 棒グラフ履歴を更新
+          const prevLen = intervalHistoryRef.current.length;
           intervalHistoryRef.current = [
             ...intervalHistoryRef.current.slice(-(INTERVAL_HISTORY - 1)),
             { ms: intervalMs, dir },
           ];
+          const removed = prevLen - (intervalHistoryRef.current.length - 1);
+          if (removed > 0) {
+            challengeBarStartIdx.current = Math.max(0, challengeBarStartIdx.current - removed);
+          }
           // チャレンジモード: インターバル記録
           if (challengeStateRef.current === "running") {
             challengeIntervalsRef.current.push({ ms: intervalMs, dir });
@@ -735,7 +787,13 @@ export default function App() {
           if (chartCanvasRef.current) {
             chartCanvasRef.current.width = w;
             if (chartCtxRef.current) {
-              drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, w, CHART_H);
+              const cs = challengeStateRef.current;
+              const cbr = cs === "running"
+                ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
+                : cs === "done"
+                ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
+                : null;
+              drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, w, CHART_H, cbr);
             }
           }
         }
@@ -854,13 +912,25 @@ export default function App() {
         const orderedLanes = sideRef.current === "2P"
           ? [...LANE_DEFS.filter(l => l.id !== "SCR"), LANE_DEFS.find(l => l.id === "SCR")!]
           : LANE_DEFS;
+        const crs = challengeStateRef.current;
+        const cRange = crs === "running"
+          ? { startMs: challengeStartRef.current, endMs: nowMs }
+          : crs === "done"
+          ? { startMs: challengeStartRef.current, endMs: challengeEndRef.current }
+          : null;
         drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
           canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
           scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
-          greenNumRef.current * 1000 / 600);
+          greenNumRef.current * 1000 / 600, cRange);
       }
       if (chartCtxRef.current) {
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H);
+        const cs = challengeStateRef.current;
+        const cBarRange = cs === "running"
+          ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
+          : cs === "done"
+          ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
+          : null;
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H, cBarRange);
       }
       // チャレンジモード: タイマー更新
       if (challengeStateRef.current === "running") {
@@ -870,6 +940,8 @@ export default function App() {
           challengeStateRef.current = "done";
           setChallengeState("done");
           setChallengeTimeLeft(0);
+          challengeEndRef.current = challengeStartRef.current + challengeDurationRef.current * 1000;
+          challengeBarEndIdx.current = intervalHistoryRef.current.length;
           const intervals = challengeIntervalsRef.current;
           const avgMs = intervals.length > 0
             ? Math.round(intervals.reduce((s, e) => s + e.ms, 0) / intervals.length)
@@ -1136,9 +1208,9 @@ export default function App() {
                 )}
                 <a
                   href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
-                    `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチした！`
+                    `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチしたよ！`
                     + (challengeResult.avgMs !== null
-                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? `\n(BPM${bpm} ${challengeResult.noteDivision})` : "")
+                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? ` (BPM${bpm} ${challengeResult.noteDivision})` : "")
                       : "")
                     + "\n#daken_trainer"
                   )}`}
