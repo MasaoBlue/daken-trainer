@@ -398,10 +398,9 @@ function drawBarChart(
   for (let i = 0; i < count; i++) {
     const { ms, dir } = intervals[i];
     const x = plotX + i * barW;
-    const yTop = Math.max(PAD_T, msToY(ms));
     const yBottom = PAD_T + plotH;
+    const yTop = Math.min(Math.max(PAD_T, msToY(ms)), yBottom - DIR_INDICATOR_H);
     const barH = yBottom - yTop;
-    if (barH <= 0) continue;
 
     // 縦グラデーション: 下=グレー(4分/遅い) → 上(バー先端)=赤系(32分に近いほど赤)
     const barDiv = Math.max(4, Math.min(32,
@@ -567,6 +566,7 @@ export default function App() {
   const scrCountRef     = useRef(0);
   const scrLastTimeRef  = useRef<number>(-Infinity);
   const scrLastDirRef   = useRef<number>(0);
+  const scrLastEventTimeRef = useRef<number>(-Infinity); // SCRイベント毎に更新（カウント関係なく）
 
   interface ScrInfo {
     count: number;
@@ -668,8 +668,14 @@ export default function App() {
       };
 
       // SCR 方向変化処理（ButtonDown / AxisMove 共通）
+      // 同じ方向の入力: 最後のイベントから100ms以上途切れたら別入力とみなす
       const handleScrDirectionChange = (dir: number) => {
-        if (dir === scrLastDirRef.current) return;
+        const isSameDir = dir === scrLastDirRef.current;
+        if (isSameDir && nowJs - scrLastEventTimeRef.current < 100) {
+          scrLastEventTimeRef.current = nowJs;
+          return;
+        }
+        scrLastEventTimeRef.current = nowJs;
         scrLastDirRef.current = dir;
         const prevTime = scrLastTimeRef.current;
         scrLastTimeRef.current = nowJs;
@@ -902,6 +908,7 @@ export default function App() {
       if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > SCR_RESET_MS) {
         scrCountRef.current = 0;
         scrLastDirRef.current = 0;
+        scrLastEventTimeRef.current = -Infinity;
         scrOriginRef.current = -Infinity;
         scrPrevDirTimeRef.current = null;
         scrIntervalHistRef.current = [];
