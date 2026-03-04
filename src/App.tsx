@@ -547,6 +547,22 @@ export default function App() {
   const chartWidthRef = useRef(CHART_W);
   const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry; idx: number } | null>(null);
 
+  // チャレンジモード
+  type ChallengeState = "idle" | "ready" | "running" | "done";
+  const [challengeState, setChallengeState] = useState<ChallengeState>("idle");
+  const challengeStateRef = useRef<ChallengeState>("idle");
+  const [challengeDuration, setChallengeDuration] = useState(30);
+  const challengeDurationRef = useRef(30);
+  const challengeStartRef = useRef(0);
+  const challengeScrCountRef = useRef(0);
+  const [challengeScrCount, setChallengeScrCount] = useState(0);
+  const [challengeTimeLeft, setChallengeTimeLeft] = useState(0);
+  const challengeIntervalsRef = useRef<IntervalEntry[]>([]);
+  const [challengeResult, setChallengeResult] = useState<{
+    count: number; duration: number; avgMs: number | null;
+    noteDivision: string | null; isNewBest: boolean;
+  } | null>(null);
+
   // キーコンフィグ
   const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
   const keyConfigRef    = useRef<KeyConfig>(loadConfig());
@@ -608,6 +624,19 @@ export default function App() {
         setScrCount(scrCountRef.current);
         invoke("play_clap").catch(() => {});
 
+        // チャレンジモード: スクラッチカウント
+        if (challengeStateRef.current === "ready") {
+          challengeStateRef.current = "running";
+          setChallengeState("running");
+          challengeStartRef.current = nowJs;
+          challengeScrCountRef.current = 1;
+          setChallengeScrCount(1);
+          challengeIntervalsRef.current = [];
+        } else if (challengeStateRef.current === "running") {
+          challengeScrCountRef.current += 1;
+          setChallengeScrCount(challengeScrCountRef.current);
+        }
+
         let intervalMs: number | null = null;
         let estimatedBpm: number | null = null;
         let offsetMs: number | null = null;
@@ -621,6 +650,10 @@ export default function App() {
             ...intervalHistoryRef.current.slice(-(INTERVAL_HISTORY - 1)),
             { ms: intervalMs, dir },
           ];
+          // チャレンジモード: インターバル記録
+          if (challengeStateRef.current === "running") {
+            challengeIntervalsRef.current.push({ ms: intervalMs, dir });
+          }
 
           const elapsedMs = nowJs - scrOriginRef.current;
           if (elapsedMs > 0 && scrCountRef.current >= 2) {
@@ -829,6 +862,31 @@ export default function App() {
       if (chartCtxRef.current) {
         drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H);
       }
+      // チャレンジモード: タイマー更新
+      if (challengeStateRef.current === "running") {
+        const elapsed = (nowMs - challengeStartRef.current) / 1000;
+        const remaining = challengeDurationRef.current - elapsed;
+        if (remaining <= 0) {
+          challengeStateRef.current = "done";
+          setChallengeState("done");
+          setChallengeTimeLeft(0);
+          const intervals = challengeIntervalsRef.current;
+          const avgMs = intervals.length > 0
+            ? Math.round(intervals.reduce((s, e) => s + e.ms, 0) / intervals.length)
+            : null;
+          const nd = avgMs !== null && bpmRef.current > 0
+            ? nearestNoteDivision(avgMs, bpmRef.current) : null;
+          const cnt = challengeScrCountRef.current;
+          const dur = challengeDurationRef.current;
+          const bestKey = `scratch-trainer-challenge-best-${dur}`;
+          const prevBest = parseInt(localStorage.getItem(bestKey) ?? "0");
+          const isNewBest = cnt > prevBest;
+          if (isNewBest) localStorage.setItem(bestKey, String(cnt));
+          setChallengeResult({ count: cnt, duration: dur, avgMs, noteDivision: nd, isNewBest });
+        } else {
+          setChallengeTimeLeft(remaining);
+        }
+      }
       rafRef.current = requestAnimationFrame(loop);
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -964,8 +1022,116 @@ export default function App() {
         </Button>
       </div>
 
-      {/* メイン行: canvas + スライダー + 設定パネル */}
+      {/* メイン行: チャレンジ + canvas + スライダー + 設定パネル */}
       <div className="flex items-start gap-2 overflow-x-auto">
+
+        {/* チャレンジモード */}
+        <Card className={`h-fit shrink-0 w-[160px] ${challengeState === "running" ? "border-orange-500/50 shadow-[0_0_8px_rgba(255,165,0,0.2)]" : ""}`}>
+          <CardHeader className="pb-2 pt-3 px-3">
+            <CardTitle className="text-xs text-muted-foreground">Challenge</CardTitle>
+          </CardHeader>
+          <CardContent className="px-3 pb-3 flex flex-col gap-2 items-center">
+            {/* 時間選択ボタン */}
+            <div className="grid grid-cols-3 gap-1 w-full">
+              {([1, 5, 10, 20, 30, 60] as const).map(d => (
+                <Button
+                  key={d}
+                  size="sm"
+                  variant={challengeState !== "idle" && challengeDuration === d ? "default" : "outline"}
+                  className="text-xs px-1 h-7"
+                  disabled={challengeState === "running"}
+                  onClick={() => {
+                    setChallengeDuration(d);
+                    challengeDurationRef.current = d;
+                    challengeStateRef.current = "ready";
+                    setChallengeState("ready");
+                    challengeScrCountRef.current = 0;
+                    setChallengeScrCount(0);
+                    setChallengeResult(null);
+                  }}
+                >
+                  {d === 60 ? "1m" : `${d}s`}
+                </Button>
+              ))}
+            </div>
+
+            {/* タイマー表示（ready / running） */}
+            {(challengeState === "ready" || challengeState === "running") && (
+              <div className={`font-mono text-3xl font-bold tabular-nums text-center w-full ${
+                challengeState === "ready" ? "text-zinc-500" : "text-orange-400"
+              }`}>
+                {challengeState === "ready"
+                  ? `${challengeDuration}.00`
+                  : challengeTimeLeft.toFixed(2)
+                }
+              </div>
+            )}
+
+            {/* READY: スクラッチで開始プロンプト */}
+            {challengeState === "ready" && (
+              <>
+                <span className="text-xs text-muted-foreground animate-pulse">
+                  スクラッチで開始
+                </span>
+                <Button
+                  size="sm" variant="ghost"
+                  className="text-xs"
+                  onClick={() => {
+                    challengeStateRef.current = "idle";
+                    setChallengeState("idle");
+                  }}
+                >
+                  キャンセル
+                </Button>
+              </>
+            )}
+
+            {/* RUNNING: スクラッチ回数 */}
+            {challengeState === "running" && (
+              <div className="text-center w-full">
+                <span className="text-[10px] text-muted-foreground">Scratches</span>
+                <div className="font-mono text-3xl font-bold tabular-nums text-yellow-300">
+                  {challengeScrCount}
+                </div>
+              </div>
+            )}
+
+            {/* DONE: 結果表示 */}
+            {challengeState === "done" && challengeResult && (
+              <div className="text-center flex flex-col gap-1 w-full">
+                <div className="text-base font-bold text-green-400">FINISH!</div>
+                <div className="font-mono text-3xl font-bold tabular-nums text-yellow-300">
+                  {challengeResult.count}
+                </div>
+                <span className="text-[10px] text-muted-foreground">scratches</span>
+                {challengeResult.avgMs !== null && (
+                  <span className="text-xs text-zinc-400">
+                    Avg: {challengeResult.avgMs}ms
+                    {challengeResult.noteDivision && ` (${challengeResult.noteDivision})`}
+                  </span>
+                )}
+                {challengeResult.isNewBest && (
+                  <span className="text-xs text-green-400 font-bold animate-pulse">
+                    NEW BEST!
+                  </span>
+                )}
+                <a
+                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
+                    `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチした！`
+                    + (challengeResult.avgMs !== null
+                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? ` (${challengeResult.noteDivision})` : "")
+                      : "")
+                  )}&hashtags=${encodeURIComponent("daken_trainer")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 inline-flex items-center justify-center gap-1 text-xs px-3 py-1.5 rounded border border-border text-muted-foreground hover:text-foreground hover:border-zinc-500 transition-colors"
+                >
+                  Share on 𝕏
+                </a>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Canvas */}
         <canvas
