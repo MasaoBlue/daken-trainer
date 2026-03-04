@@ -429,7 +429,7 @@ function nearestNoteDivision(intervalMs: number, bpm: number): string {
     const diff = Math.abs(intervalMs - noteMs);
     if (diff < bestDiff) { bestDiff = diff; best = d; }
   }
-  return `${best}分`;
+  return `${best}分相当`;
 }
 
 // ---- メインコンポーネント --------------------------------------------------
@@ -560,7 +560,7 @@ export default function App() {
   const challengeIntervalsRef = useRef<IntervalEntry[]>([]);
   const [challengeResult, setChallengeResult] = useState<{
     count: number; duration: number; avgMs: number | null;
-    noteDivision: string | null; isNewBest: boolean;
+    noteDivision: string | null;
   } | null>(null);
 
   // キーコンフィグ
@@ -878,11 +878,7 @@ export default function App() {
             ? nearestNoteDivision(avgMs, bpmRef.current) : null;
           const cnt = challengeScrCountRef.current;
           const dur = challengeDurationRef.current;
-          const bestKey = `scratch-trainer-challenge-best-${dur}`;
-          const prevBest = parseInt(localStorage.getItem(bestKey) ?? "0");
-          const isNewBest = cnt > prevBest;
-          if (isNewBest) localStorage.setItem(bestKey, String(cnt));
-          setChallengeResult({ count: cnt, duration: dur, avgMs, noteDivision: nd, isNewBest });
+          setChallengeResult({ count: cnt, duration: dur, avgMs, noteDivision: nd });
         } else {
           setChallengeTimeLeft(remaining);
         }
@@ -1037,8 +1033,8 @@ export default function App() {
                 <Button
                   key={d}
                   size="sm"
-                  variant={challengeState !== "idle" && challengeDuration === d ? "default" : "outline"}
-                  className="text-xs px-1 h-7"
+                  variant={challengeState !== "idle" && challengeDuration === d && challengeState !== "done" ? "default" : "outline"}
+                  className={`text-xs px-1 h-7 ${challengeState === "done" && challengeDuration === d ? "border-primary text-primary" : ""}`}
                   disabled={challengeState === "running"}
                   onClick={() => {
                     setChallengeDuration(d);
@@ -1055,17 +1051,37 @@ export default function App() {
               ))}
             </div>
 
-            {/* タイマー表示（ready / running） */}
-            {(challengeState === "ready" || challengeState === "running") && (
-              <div className={`font-mono text-3xl font-bold tabular-nums text-center w-full ${
-                challengeState === "ready" ? "text-zinc-500" : "text-orange-400"
+            {/* タイマー表示 */}
+            <div className={`font-mono text-3xl font-bold tabular-nums text-center w-full ${
+              challengeState === "running" ? "text-orange-400"
+                : challengeState === "ready" ? "text-zinc-500"
+                : challengeState === "done" ? "text-zinc-500"
+                : "text-zinc-700"
+            }`}>
+              {challengeState === "running"
+                ? challengeTimeLeft.toFixed(2)
+                : challengeState === "ready"
+                ? `${challengeDuration}.00`
+                : challengeState === "done"
+                ? "0.00"
+                : "0.00"}
+            </div>
+
+            {/* スクラッチ回数 */}
+            <div className="text-center w-full">
+              <span className="text-[10px] text-muted-foreground">Scratches</span>
+              <div className={`font-mono text-3xl font-bold tabular-nums ${
+                challengeState === "running" ? "text-yellow-300"
+                  : challengeState === "done" ? "text-yellow-300"
+                  : "text-zinc-700"
               }`}>
-                {challengeState === "ready"
-                  ? `${challengeDuration}.00`
-                  : challengeTimeLeft.toFixed(2)
-                }
+                {challengeState === "running"
+                  ? challengeScrCount
+                  : challengeState === "done" && challengeResult
+                  ? challengeResult.count
+                  : "—"}
               </div>
-            )}
+            </div>
 
             {/* READY: スクラッチで開始プロンプト */}
             {challengeState === "ready" && (
@@ -1086,42 +1102,46 @@ export default function App() {
               </>
             )}
 
-            {/* RUNNING: スクラッチ回数 */}
+            {/* RUNNING: リセットボタン */}
             {challengeState === "running" && (
-              <div className="text-center w-full">
-                <span className="text-[10px] text-muted-foreground">Scratches</span>
-                <div className="font-mono text-3xl font-bold tabular-nums text-yellow-300">
-                  {challengeScrCount}
-                </div>
-              </div>
+              <Button
+                size="sm" variant="ghost"
+                className="text-xs"
+                onClick={() => {
+                  challengeStateRef.current = "idle";
+                  setChallengeState("idle");
+                  challengeScrCountRef.current = 0;
+                  setChallengeScrCount(0);
+                }}
+              >
+                リセット
+              </Button>
             )}
 
-            {/* DONE: 結果表示 */}
+            {/* DONE: 結果詳細 */}
             {challengeState === "done" && challengeResult && (
               <div className="text-center flex flex-col gap-1 w-full">
                 <div className="text-base font-bold text-green-400">FINISH!</div>
-                <div className="font-mono text-3xl font-bold tabular-nums text-yellow-300">
-                  {challengeResult.count}
-                </div>
-                <span className="text-[10px] text-muted-foreground">scratches</span>
                 {challengeResult.avgMs !== null && (
-                  <span className="text-xs text-zinc-400">
-                    Avg: {challengeResult.avgMs}ms
-                    {challengeResult.noteDivision && ` (${challengeResult.noteDivision})`}
-                  </span>
-                )}
-                {challengeResult.isNewBest && (
-                  <span className="text-xs text-green-400 font-bold animate-pulse">
-                    NEW BEST!
-                  </span>
+                  <div className="flex flex-col gap-0">
+                    <span className="text-xs text-zinc-400">
+                      Avg: {challengeResult.avgMs}ms
+                    </span>
+                    {challengeResult.noteDivision && (
+                      <span className="text-xs text-zinc-500">
+                        (BPM{bpm} {challengeResult.noteDivision})
+                      </span>
+                    )}
+                  </div>
                 )}
                 <a
                   href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
                     `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチした！`
                     + (challengeResult.avgMs !== null
-                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? ` (${challengeResult.noteDivision})` : "")
+                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? `\n(BPM${bpm} ${challengeResult.noteDivision})` : "")
                       : "")
-                  )}&hashtags=${encodeURIComponent("daken_trainer")}`}
+                    + "\n#daken_trainer"
+                  )}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-1 inline-flex items-center justify-center gap-1 text-xs px-3 py-1.5 rounded border border-border text-muted-foreground hover:text-foreground hover:border-zinc-500 transition-colors"
