@@ -51,8 +51,8 @@ const GREEN_NUM_DEFAULT     = 1000;
 const AXIS_TIMEOUT      = 150;
 const SCR_RESET_MS      = 500;
 const SPAN_RETAIN       = 600000;
-const INTERVAL_HISTORY  = 200; // 棒グラフに表示する直近N枚分
-const CHART_W           = 570; // 棒グラフ固定幅 (px)
+const CHART_BAR_W       = 10;  // 棒グラフ1本の固定幅 (px)
+const CHART_W           = 570; // 棒グラフ最小幅 (px)
 const CHART_H           = 160; // 棒グラフ固定高さ (px)
 
 // ---- ストレージキー ---------------------------------------------------------
@@ -353,12 +353,8 @@ function drawBarChart(
     return PAD_T + Math.round(ratio * plotH); // ratioが大きい(遅い)ほど下
   };
 
-  // バー幅: intervals数に応じて可変、最小2px、最大10px
-  // 右端が最新。左から並べ、足りない分は右端まで詰めない（左余白なし、左から順に配置）
   const count = intervals.length;
-  const barW = count > 0 ? Math.max(1, Math.min(10, Math.floor(plotW / count))) : 8;
-  // バーが足りない場合は左詰め（右にスペースが余る）
-  // バーが多い場合は右端まで使う（INTERVAL_HISTORY以上になることはないが念のため）
+  const barW = CHART_BAR_W;
 
   // Y軸リファレンスライン（ラベル付きのみ描画）
   for (const { d, ms } of noteRefMs) {
@@ -431,7 +427,7 @@ function drawBarChart(
   ctx.fillStyle = "#aaa";
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
-  const tickStep = count > 100 ? 50 : 10;
+  const tickStep = 10;
   const tickList = [1];
   for (let n = tickStep; n <= count; n += tickStep) tickList.push(n);
   for (const n of tickList) {
@@ -724,15 +720,10 @@ export default function App() {
           intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
 
           // 棒グラフ履歴を更新
-          const prevLen = intervalHistoryRef.current.length;
           intervalHistoryRef.current = [
-            ...intervalHistoryRef.current.slice(-(INTERVAL_HISTORY - 1)),
+            ...intervalHistoryRef.current,
             { ms: intervalMs, dir },
           ];
-          const removed = prevLen - (intervalHistoryRef.current.length - 1);
-          if (removed > 0) {
-            challengeBarStartIdx.current = Math.max(0, challengeBarStartIdx.current - removed);
-          }
           // チャレンジモード: インターバル記録
           if (challengeStateRef.current === "running") {
             challengeIntervalsRef.current.push({ ms: intervalMs, dir });
@@ -819,17 +810,17 @@ export default function App() {
         const w = Math.floor(entries[0].contentRect.width);
         if (w > 0 && w !== chartWidthRef.current) {
           chartWidthRef.current = w;
-          if (chartCanvasRef.current) {
-            chartCanvasRef.current.width = w;
-            if (chartCtxRef.current) {
-              const cs = challengeStateRef.current;
-              const cbr = cs === "running"
-                ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
-                : cs === "done"
-                ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
-                : null;
-              drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, w, CHART_H, cbr);
-            }
+          if (chartCanvasRef.current && chartCtxRef.current) {
+            const neededW = CHART_PAD_L + intervalHistoryRef.current.length * CHART_BAR_W;
+            const cw = Math.max(w, neededW);
+            chartCanvasRef.current.width = cw;
+            const cs = challengeStateRef.current;
+            const cbr = cs === "running"
+              ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
+              : cs === "done"
+              ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
+              : null;
+            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr);
           }
         }
       });
@@ -959,14 +950,24 @@ export default function App() {
           scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
           greenNumRef.current * 1000 / 600, cRange);
       }
-      if (chartCtxRef.current) {
+      if (chartCtxRef.current && chartCanvasRef.current) {
         const cs = challengeStateRef.current;
         const cBarRange = cs === "running"
           ? { startIdx: challengeBarStartIdx.current, endIdx: intervalHistoryRef.current.length }
           : cs === "done"
           ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
           : null;
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, chartWidthRef.current, CHART_H, cBarRange);
+        // キャンバス幅をバー数に応じて拡張（コンテナ幅以上にする）
+        const neededW = CHART_PAD_L + intervalHistoryRef.current.length * CHART_BAR_W;
+        const cw = Math.max(chartWidthRef.current, neededW);
+        if (chartCanvasRef.current.width !== cw) {
+          chartCanvasRef.current.width = cw;
+          // 右端に自動スクロール
+          if (chartContainerRef.current) {
+            chartContainerRef.current.scrollLeft = chartContainerRef.current.scrollWidth;
+          }
+        }
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange);
       }
       // チャレンジモード: タイマー更新
       if (challengeStateRef.current === "running") {
@@ -1485,8 +1486,17 @@ export default function App() {
         <CardHeader className="pb-1 pt-3 px-3">
           <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
         </CardHeader>
-        <CardContent className="px-3 pb-3" ref={chartContainerRef}>
-          <div className="relative">
+        <CardContent className="px-3 pb-3">
+          <div
+            className="relative overflow-x-auto"
+            ref={chartContainerRef}
+            onWheel={(e) => {
+              e.preventDefault();
+              if (chartContainerRef.current) {
+                chartContainerRef.current.scrollLeft += e.deltaY;
+              }
+            }}
+          >
             <canvas
               ref={chartCanvasRef}
               width={CHART_W}
@@ -1495,11 +1505,9 @@ export default function App() {
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const x = e.clientX - rect.left;
-                const cw = chartWidthRef.current;
                 const intervals = intervalHistoryRef.current;
                 if (intervals.length === 0) return;
-                const plotW = cw - CHART_PAD_L;
-                const barW = Math.max(1, Math.min(10, Math.floor(plotW / intervals.length)));
+                const barW = CHART_BAR_W;
                 const barIdx = Math.floor((x - CHART_PAD_L) / barW);
                 if (barIdx >= 0 && barIdx < intervals.length) {
                   const entry = intervals[barIdx];
