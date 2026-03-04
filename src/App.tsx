@@ -412,8 +412,8 @@ function drawBarChart(
     const dirColor = dir > 0 ? "#4f8" : "#fa4";
 
     const bx = x, bw = barW - 1;
-    if (i === 0) {
-      // 1本目: 縦幅100%・軸線
+    if (ms === 0) {
+      // 1枚目（intervalなし）: 縦幅100%・方向色のみ
       ctx.fillStyle = dirColor;
       ctx.globalAlpha = 0.6;
       ctx.fillRect(bx, PAD_T, bw, plotH);
@@ -664,9 +664,11 @@ export default function App() {
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
           if (challengeStateRef.current !== "running") {
-            intervalHistoryRef.current = [];
+            intervalHistoryRef.current = [{ ms: 0, dir }];
             challengeBarStartIdx.current = 0;
             challengeBarEndIdx.current = 0;
+          } else {
+            intervalHistoryRef.current = [...intervalHistoryRef.current, { ms: 0, dir }];
           }
         }
         scrCountRef.current += 1;
@@ -674,6 +676,7 @@ export default function App() {
         invoke("play_clap").catch(() => {});
 
         // チャレンジモード: スクラッチカウント
+        const addedDummy = scrCountRef.current === 1; // 659行目でダミーを追加した直後
         if (challengeStateRef.current === "ready") {
           challengeStateRef.current = "running";
           setChallengeState("running");
@@ -681,7 +684,10 @@ export default function App() {
           challengeScrCountRef.current = 1;
           setChallengeScrCount(1);
           challengeIntervalsRef.current = [];
-          challengeBarStartIdx.current = intervalHistoryRef.current.length;
+          // ダミーエントリ(ms:0)がある場合はそれを含めた位置から開始
+          challengeBarStartIdx.current = addedDummy
+            ? intervalHistoryRef.current.length - 1
+            : intervalHistoryRef.current.length;
         } else if (challengeStateRef.current === "running") {
           challengeScrCountRef.current += 1;
           setChallengeScrCount(challengeScrCountRef.current);
@@ -692,7 +698,7 @@ export default function App() {
         let offsetMs: number | null = null;
         let noteDivision: string | null = null;
 
-        if (scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
+        if (scrCountRef.current >= 2 && scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
           intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
 
           // 棒グラフ履歴を更新
