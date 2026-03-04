@@ -1,4 +1,4 @@
-use gilrs::{Axis, EventType, Gilrs};
+use gilrs::{Axis, EventType};
 use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -66,10 +66,6 @@ mod raw_keyboard {
         WS_OVERLAPPEDWINDOW,
     };
 
-    // Virtual-Key codes
-    const VK_A: u16 = 0x41;
-    const VK_Q: u16 = 0x51;
-    const VK_W: u16 = 0x57;
     // WM_INPUT RI_KEY flags
     const RI_KEY_MAKE:  u16 = 0x00; // key down
     const RI_KEY_BREAK: u16 = 0x01; // key up
@@ -112,7 +108,7 @@ mod raw_keyboard {
                         let vkey  = kb.VKey;
                         let flags = kb.Flags;
                         let is_down = (flags & RI_KEY_BREAK) == RI_KEY_MAKE;
-                        if let Some(cb) = &CALLBACK {
+                        if let Some(ref cb) = *(&raw const CALLBACK) {
                             cb(vkey, is_down);
                         }
                     }
