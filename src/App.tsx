@@ -343,7 +343,6 @@ function drawBarChart(
   const PAD_T = 4;
   const PAD_B = 14;
   const plotX = CHART_PAD_L;      // バー描画開始X
-  const plotW = w - CHART_PAD_L;  // バー描画幅
   const plotH = h - PAD_T - PAD_B; // バー描画高さ
 
   // 対数スケール: 上=速い(小さいms=4分)、下=遅い(大きいms=32分)
