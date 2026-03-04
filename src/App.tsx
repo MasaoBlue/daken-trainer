@@ -65,6 +65,7 @@ const METRO_ON_KEY           = "daken-trainer-metro-on";
 const METRO_DIV_KEY          = "daken-trainer-metro-div";
 const METRO_VOL_KEY          = "daken-trainer-metro-vol";
 const SIDE_KEY               = "daken-trainer-side";
+const CLAP_ON_KEY            = "daken-trainer-clap-on";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
 
@@ -531,6 +532,12 @@ export default function App() {
     return String(isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v)));
   });
 
+  // クラップ音
+  const [clapOn, setClapOn] = useState(() => localStorage.getItem(CLAP_ON_KEY) !== "0");
+  const clapOnRef = useRef(localStorage.getItem(CLAP_ON_KEY) !== "0");
+  const clapLastDirRef = useRef(0);
+  const clapLastTimeRef = useRef(-Infinity);
+
   // メトロノーム
   const [metroOn, setMetroOn] = useState(() => localStorage.getItem(METRO_ON_KEY) === "1");
   const metroOnRef = useRef(localStorage.getItem(METRO_ON_KEY) === "1");
@@ -650,6 +657,16 @@ export default function App() {
       const resolved = resolveChannel(keyConfigRef.current, ev);
       if (resolved === null) return;
 
+      // クラップ音: 方向変化 or 一定時間途切れた後に鳴らす
+      const maybePlayClap = (dir: number, t: number) => {
+        if (!clapOnRef.current) return;
+        if (dir !== clapLastDirRef.current || t - clapLastTimeRef.current > 100) {
+          invoke("play_clap").catch(() => {});
+          clapLastDirRef.current = dir;
+        }
+        clapLastTimeRef.current = t;
+      };
+
       // SCR 方向変化処理（ButtonDown / AxisMove 共通）
       const handleScrDirectionChange = (dir: number) => {
         if (dir === scrLastDirRef.current) return;
@@ -673,7 +690,6 @@ export default function App() {
         }
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
-        invoke("play_clap").catch(() => {});
 
         // チャレンジモード: スクラッチカウント
         const addedDummy = scrCountRef.current === 1; // 659行目でダミーを追加した直後
@@ -751,6 +767,7 @@ export default function App() {
           ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
         }
         if (resolved.laneId === "SCR" && resolved.direction !== undefined) {
+          if (clapOnRef.current) invoke("play_clap").catch(() => {});
           handleScrDirectionChange(resolved.direction);
         }
       } else if (ev.kind === "ButtonUp") {
@@ -772,7 +789,10 @@ export default function App() {
           last.end = nowJs;
           ch.spans.push({ start: nowJs, end: null, direction: dir });
         }
-        if (resolved.laneId === "SCR") handleScrDirectionChange(dir);
+        if (resolved.laneId === "SCR") {
+          maybePlayClap(dir, nowJs);
+          handleScrDirectionChange(dir);
+        }
       }
     });
     return () => { unlisten.then((f) => f()); };
@@ -1254,7 +1274,7 @@ export default function App() {
         />
 
         {/* グリッド + メトロノーム設定 + SCR情報 */}
-        <div className="flex flex-col gap-2 shrink-0">
+        <div className="flex flex-col gap-2 shrink-0 min-w-[180px]">
         <Card className="h-fit">
           <CardHeader className="pb-2 pt-3 px-3">
             <CardTitle className="text-xs text-muted-foreground">設定</CardTitle>
@@ -1352,6 +1372,22 @@ export default function App() {
                 }}
                 className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
               />
+            </div>
+
+            {/* クラップ音 */}
+            <div className="flex items-center gap-2 border-t border-border pt-2">
+              <Checkbox
+                id="clap-on"
+                checked={clapOn}
+                onCheckedChange={(checked) => {
+                  const on = !!checked;
+                  setClapOn(on); clapOnRef.current = on;
+                  localStorage.setItem(CLAP_ON_KEY, on ? "1" : "0");
+                }}
+              />
+              <Label htmlFor="clap-on" className={`text-xs cursor-pointer ${clapOn ? "text-primary" : "text-muted-foreground"}`}>
+                クラップ音 {clapOn ? "ON" : "OFF"}
+              </Label>
             </div>
 
             {/* メトロノーム */}
