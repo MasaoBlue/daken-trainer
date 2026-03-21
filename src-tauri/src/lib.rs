@@ -1,3 +1,5 @@
+mod storage;
+
 use gilrs::{Axis, EventType};
 use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::Serialize;
@@ -5,7 +7,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // clap.mp3 をコンパイル時にバイナリ埋め込み
 static CLAP_MP3: &[u8] = include_bytes!("../assets/clap.mp3");
@@ -324,6 +326,82 @@ fn play_clap() {
     }
 }
 
+// ---- ストレージコマンド -------------------------------------------------------
+
+fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    storage::ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+#[tauri::command]
+fn read_config(app: AppHandle) -> Result<String, String> {
+    let dir = data_dir(&app)?;
+    let path = dir.join("config.json");
+    match storage::read_json(&path) {
+        Ok(value) => {
+            let migrated = storage::migrate_config(value);
+            serde_json::to_string(&migrated).map_err(|e| e.to_string())
+        }
+        Err(e) if e == "not_found" => {
+            let default = storage::default_config();
+            serde_json::to_string(&default).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[tauri::command]
+fn write_config(app: AppHandle, json: String) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let dir = data_dir(&app)?;
+    storage::write_json(&dir.join("config.json"), &value)
+}
+
+#[tauri::command]
+fn read_records(app: AppHandle) -> Result<String, String> {
+    let dir = data_dir(&app)?;
+    let path = dir.join("records.json");
+    match storage::read_json(&path) {
+        Ok(value) => {
+            let migrated = storage::migrate_records(value);
+            serde_json::to_string(&migrated).map_err(|e| e.to_string())
+        }
+        Err(e) if e == "not_found" => {
+            let default = storage::default_records();
+            serde_json::to_string(&default).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[tauri::command]
+fn write_records(app: AppHandle, json: String) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let dir = data_dir(&app)?;
+    storage::write_json(&dir.join("records.json"), &value)
+}
+
+#[tauri::command]
+fn export_records(app: AppHandle, path: String) -> Result<(), String> {
+    let dir = data_dir(&app)?;
+    let src = dir.join("records.json");
+    if !src.exists() {
+        // Export default empty records if no file exists yet
+        let default = storage::default_records();
+        storage::write_json(&std::path::PathBuf::from(&path), &default)
+    } else {
+        std::fs::copy(&src, &path).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn get_app_data_dir(app: AppHandle) -> Result<String, String> {
+    let dir = data_dir(&app)?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let epoch    = Instant::now();
@@ -333,7 +411,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, play_clap])
+        .invoke_handler(tauri::generate_handler![
+            greet, play_clap,
+            read_config, write_config,
+            read_records, write_records,
+            export_records, get_app_data_dir,
+        ])
         .setup(move |app| {
             #[cfg(windows)]
             raw_keyboard::start(app.handle().clone(), epoch, audio_tx.clone());

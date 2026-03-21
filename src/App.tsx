@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -13,59 +13,25 @@ import {
 import { Play, ChevronsRight, Settings } from "lucide-react";
 import "./App.css";
 
-// ---- 型定義 ----------------------------------------------------------------
-
-type InputEvent =
-  | { kind: "ButtonDown"; source: string; id: string; t: number }
-  | { kind: "ButtonUp";   source: string; id: string; t: number }
-  | { kind: "AxisMove";   source: string; id: string; direction: number; value: number; t: number };
-
-interface Binding {
-  source: string;
-  id: string;
-  direction?: number;
-}
-
-type KeyConfig = Record<string, Binding | null>;
-
-interface Span {
-  start: number;
-  end: number | null;
-  direction?: number;
-  rustT?: number;
-}
-
-interface Channel {
-  id: string;
-  source: string;
-  kind: "button" | "axis";
-  spans: Span[];
-}
-
-// ---- 定数 ------------------------------------------------------------------
-
-const CANVAS_H          = 600;
-const HEADER_H          = 40;
-const GREEN_NUM_STORAGE_KEY = "daken-trainer-green-num";
-const GREEN_NUM_DEFAULT     = 1000;
-const AXIS_TIMEOUT      = 150;
-const SCR_RESET_MS      = 500;
-const SPAN_RETAIN       = 600000;
-const CHART_BAR_W       = 10;  // 棒グラフ1本の固定幅 (px)
-const CHART_W           = 570; // 棒グラフ最小幅 (px)
-const CHART_H           = 160; // 棒グラフ固定高さ (px)
-
-// ---- ストレージキー ---------------------------------------------------------
-
-const STORAGE_KEY            = "daken-trainer-keyconfig";
-const BPM_STORAGE_KEY        = "daken-trainer-bpm";
-const SCR_ORIGIN_STORAGE_KEY = "daken-trainer-scr-origin";
-const GRID_MODE_STORAGE_KEY  = "daken-trainer-grid-mode";
-const METRO_ON_KEY           = "daken-trainer-metro-on";
-const METRO_DIV_KEY          = "daken-trainer-metro-div";
-const METRO_VOL_KEY          = "daken-trainer-metro-vol";
-const SIDE_KEY               = "daken-trainer-side";
-const CLAP_ON_KEY            = "daken-trainer-clap-on";
+import type {
+  InputEvent, Binding, KeyConfig, Channel, LaneDef,
+  GridMode, ScrInfo, IntervalEntry, ChallengeState,
+  AppConfig, AppRecords, ChallengeRecord, DrillResult, RapidPressResult,
+} from "./types";
+import {
+  CANVAS_H, HEADER_H, AXIS_TIMEOUT, SCR_RESET_MS, SPAN_RETAIN,
+  CHART_BAR_W, CHART_W, CHART_H, CHART_PAD_L, GREEN_NUM_DEFAULT,
+  STORAGE_KEY, BPM_STORAGE_KEY, SCR_ORIGIN_STORAGE_KEY, GRID_MODE_STORAGE_KEY,
+  METRO_ON_KEY, METRO_DIV_KEY, METRO_VOL_KEY, SIDE_KEY, CLAP_ON_KEY,
+  GREEN_NUM_STORAGE_KEY, LANE_DEFS, KEY_DEFS,
+} from "./constants";
+import { nearestNoteDivision, noteColor } from "./lib/noteUtils";
+import {
+  readConfig, writeConfig, readRecords, writeRecords,
+  exportRecords, migrateFromLocalStorage, clearLocalStorage,
+} from "./lib/storage";
+import DrillMode from "./components/DrillMode";
+import RecordsView from "./components/RecordsView";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
 
@@ -97,31 +63,9 @@ function bindingLabel(b: Binding | null | undefined): string {
   return `${b.id}${dir}`;
 }
 
-// ---- レーン定義 -------------------------------------------------------------
-
-interface LaneDef {
-  id: string;
-  label: string;
-  w: number;
-  noteColor: string;
-  axisColorPos?: string;
-  axisColorNeg?: string;
-}
-
-const LANE_DEFS: LaneDef[] = [
-  { id: "SCR",  label: "Scratch", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
-  { id: "KEY1", label: "1",   w: 52,  noteColor: "#eee" },
-  { id: "KEY2", label: "2",   w: 40,  noteColor: "#48f" },
-  { id: "KEY3", label: "3",   w: 52,  noteColor: "#eee" },
-  { id: "KEY4", label: "4",   w: 40,  noteColor: "#48f" },
-  { id: "KEY5", label: "5",   w: 52,  noteColor: "#eee" },
-  { id: "KEY6", label: "6",   w: 40,  noteColor: "#48f" },
-  { id: "KEY7", label: "7",   w: 52,  noteColor: "#eee" },
-];
+// ---- レーン定義 (constants.tsからimport) ------------------------------------
 
 // ---- Canvas 描画 -----------------------------------------------------------
-
-type GridMode = "time" | "bpm" | "scr";
 
 function drawTimeline(
   ctx: CanvasRenderingContext2D,
@@ -138,6 +82,7 @@ function drawTimeline(
   laneDefs: LaneDef[],
   timeWindow: number,
   challengeRange: { startMs: number; endMs: number } | null,
+  activeLaneId: string | null,
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
   ctx.fillStyle = "#111";
@@ -166,6 +111,12 @@ function drawTimeline(
       ctx.fillStyle = activeColor;
       ctx.fillRect(x, 0, lane.w, HEADER_H);
       ctx.restore();
+    }
+
+    // 集計対象レーンの太線インジケータ
+    if (activeLaneId && lane.id === activeLaneId) {
+      ctx.fillStyle = "#0cf";
+      ctx.fillRect(x, 0, lane.w, 3);
     }
 
     ctx.strokeStyle = "#333"; ctx.lineWidth = 1;
@@ -299,11 +250,6 @@ function drawTimeline(
 
 // ---- 棒グラフ Canvas 描画 ---------------------------------------------------
 
-interface IntervalEntry { ms: number; dir: number; }
-
-// Y軸ラベル幅（左余白）
-const CHART_PAD_L = 30;
-
 function drawBarChart(
   ctx: CanvasRenderingContext2D,
   intervals: IntervalEntry[],
@@ -319,14 +265,7 @@ function drawBarChart(
   // 音符区分: 4〜32の全整数（5分・7分などのタプレットも含む）
   const ALL_DIVS = Array.from({ length: 29 }, (_, i) => i + 4); // 4〜32
   const LABELED_DIVS = new Set([4, 8, 12, 16, 24, 32]); // 5,6,7は除去
-  // 4分=グレー(遅い) → 32分=赤(速い)
-  const NOTE_COLOR = (d: number): string => {
-    const t = (d - 4) / (32 - 4); // 0.0(4分/グレー) 〜 1.0(32分/赤)
-    const r = Math.round(80  + t * 175); // 80  → 255
-    const g = Math.round(80  - t * 60);  // 80  → 20
-    const b = Math.round(80  - t * 60);  // 80  → 20
-    return `rgb(${r},${g},${b})`;
-  };
+  const NOTE_COLOR = noteColor;
   const beatMs = bpm > 0 ? 60000 / bpm : 0;
   const noteRefMs = ALL_DIVS.map(d => ({ d, ms: beatMs > 0 ? beatMs / (d / 4) : 0 }));
   // 上=速い(小さいms=32分)、下=遅い(大きいms=4分)
@@ -455,19 +394,7 @@ function drawBarChart(
   }
 }
 
-// ---- 音符区分ヘルパー -------------------------------------------------------
-
-// BPMと間隔msから最も近い音符区分を返す（4〜32の全整数）
-function nearestNoteDivision(intervalMs: number, bpm: number): string {
-  const beatMs = 60000 / bpm;
-  let best = 4, bestDiff = Infinity;
-  for (let d = 4; d <= 32; d++) {
-    const noteMs = beatMs / (d / 4);
-    const diff = Math.abs(intervalMs - noteMs);
-    if (diff < bestDiff) { bestDiff = diff; best = d; }
-  }
-  return `${best}分相当`;
-}
+// ---- 音符区分ヘルパー (lib/noteUtils.tsからimport) -------------------------
 
 // ---- メインコンポーネント --------------------------------------------------
 
@@ -563,13 +490,6 @@ export default function App() {
   const scrLastDirRef   = useRef<number>(0);
   const scrLastEventTimeRef = useRef<number>(-Infinity); // SCRイベント毎に更新（カウント関係なく）
 
-  interface ScrInfo {
-    count: number;
-    intervalMs: number | null;
-    estimatedBpm: number | null;
-    offsetMs: number | null;
-    noteDivision: string | null;
-  }
   const [scrInfo, setScrInfo] = useState<ScrInfo>({
     count: 0, intervalMs: null, estimatedBpm: null, offsetMs: null, noteDivision: null,
   });
@@ -592,7 +512,6 @@ export default function App() {
   const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry; idx: number } | null>(null);
 
   // チャレンジモード
-  type ChallengeState = "idle" | "ready" | "running" | "done";
   const [challengeState, setChallengeState] = useState<ChallengeState>("idle");
   const challengeStateRef = useRef<ChallengeState>("idle");
   const [challengeDuration, setChallengeDuration] = useState(30);
@@ -616,6 +535,195 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   const [assigningTarget, setAssigningTarget] = useState<string | null>(null);
   const assigningRef    = useRef<string | null>(null);
+
+  // ---- モードタブ ----
+  type AppMode = "free" | "challenge" | "drill";
+  const [appMode, setAppMode] = useState<AppMode>("free");
+
+  // チャレンジモード: 入力種別自動判別（"scr" | "key" | null=未確定）
+  type ChallengeInputType = "scr" | "key" | null;
+  const [challengeInputType, setChallengeInputType] = useState<ChallengeInputType>(null);
+  const challengeInputTypeRef = useRef<ChallengeInputType>(null);
+  // 連打モード用カウント（チャレンジ統合版）
+  const challengeKeyCountRef = useRef(0);
+  const [challengeKeyCount, setChallengeKeyCount] = useState(0);
+  const [_challengeKeyLabel, setChallengeKeyLabel] = useState("");
+  const challengeKeyLabelRef = useRef("");
+
+  // ---- 設定・記録の永続化 ----
+  const [_appConfig, setAppConfig] = useState<AppConfig | null>(null);
+  const [appRecords, setAppRecords] = useState<AppRecords | null>(null);
+  const appRecordsRef = useRef<AppRecords | null>(null);
+  const configLoadedRef = useRef(false);
+
+  // 日別カウント（メモリ内蓄積用）
+  const dailyScratchCountRef = useRef(0);
+  const dailyKeyPressCountRef = useRef(0);
+  const lastFlushRef = useRef(Date.now());
+
+  // 起動時: 設定読み込み + localStorageマイグレーション
+  useEffect(() => {
+    if (configLoadedRef.current) return;
+    configLoadedRef.current = true;
+    (async () => {
+      try {
+        let config = await readConfig();
+        // localStorageにデータがあればマイグレーション
+        const migrated = migrateFromLocalStorage();
+        if (migrated) {
+          // localStorageの値をマージ（既存JSONファイルよりlocalStorageを優先）
+          config = { ...config, ...migrated };
+          await writeConfig(config);
+          clearLocalStorage();
+        }
+        setAppConfig(config);
+        // 設定値をstateとrefに反映
+        if (config.keyConfig && Object.keys(config.keyConfig).length > 0) {
+          keyConfigRef.current = config.keyConfig;
+          setKeyConfig(config.keyConfig);
+        }
+        bpmRef.current = config.bpm;
+        setBpm(config.bpm);
+        setBpmText(String(config.bpm));
+        greenNumRef.current = config.greenNum;
+        setGreenNum(config.greenNum);
+        setGreenNumText(String(config.greenNum));
+        gridModeRef.current = config.gridMode;
+        setGridMode(config.gridMode);
+        metroOnRef.current = config.metronome.on;
+        setMetroOn(config.metronome.on);
+        metroDivRef.current = config.metronome.div;
+        setMetroDiv(config.metronome.div);
+        metroVolRef.current = config.metronome.vol;
+        setMetroVol(config.metronome.vol);
+        sideRef.current = config.side;
+        setSide(config.side);
+        clapOnRef.current = config.clapOn;
+        setClapOn(config.clapOn);
+        if (config.metronome.on && !audioCtxRef.current) {
+          audioCtxRef.current = new AudioContext();
+          if (audioCtxRef.current.state === "suspended") audioCtxRef.current.resume();
+        }
+      } catch (err) {
+        console.error("Config load failed:", err);
+      }
+      // 記録読み込み
+      try {
+        const records = await readRecords();
+        setAppRecords(records);
+        appRecordsRef.current = records;
+      } catch (err) {
+        console.error("Records load failed:", err);
+      }
+    })();
+  }, []);
+
+  // 設定を保存するヘルパー
+  const saveConfigToFile = useCallback((partial: Partial<AppConfig>) => {
+    setAppConfig(prev => {
+      if (!prev) return prev;
+      const updated = { ...prev, ...partial };
+      writeConfig(updated).catch(console.error);
+      return updated;
+    });
+  }, []);
+
+  // 記録を保存するヘルパー
+  const saveRecords = useCallback((updater: (prev: AppRecords) => AppRecords) => {
+    setAppRecords(prev => {
+      const base = prev ?? { version: 1, challengeRecords: [], drillRecords: [], rapidPressRecords: [], dailyCounts: {} };
+      const updated = updater(base);
+      appRecordsRef.current = updated;
+      writeRecords(updated).catch(console.error);
+      return updated;
+    });
+  }, []);
+
+  // 日別カウントのflush
+  const flushDailyCounts = useCallback(() => {
+    if (dailyScratchCountRef.current === 0 && dailyKeyPressCountRef.current === 0) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const scrDelta = dailyScratchCountRef.current;
+    const keyDelta = dailyKeyPressCountRef.current;
+    dailyScratchCountRef.current = 0;
+    dailyKeyPressCountRef.current = 0;
+    lastFlushRef.current = Date.now();
+    saveRecords(prev => {
+      const dc = { ...prev.dailyCounts };
+      const existing = dc[today] ?? { totalScratches: 0, totalKeyPresses: 0 };
+      dc[today] = {
+        totalScratches: existing.totalScratches + scrDelta,
+        totalKeyPresses: existing.totalKeyPresses + keyDelta,
+      };
+      return { ...prev, dailyCounts: dc };
+    });
+  }, [saveRecords]);
+
+  // 30秒ごと + visibilitychangeでflush
+  useEffect(() => {
+    const interval = setInterval(flushDailyCounts, 30000);
+    const onVisChange = () => { if (document.hidden) flushDailyCounts(); };
+    document.addEventListener("visibilitychange", onVisChange);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisChange);
+      flushDailyCounts();
+    };
+  }, [flushDailyCounts]);
+
+  // ---- ドリルモード・連打モード用コールバックシステム ----
+  const scratchResetCallbacks = useRef<Set<(finalCount: number, firstDir: number) => void>>(new Set());
+  const scratchChangeCallbacks = useRef<Set<(count: number, dir: number) => void>>(new Set());
+  const keyDownCallbacks = useRef<Set<(laneId: string) => void>>(new Set());
+  const scrFirstDirRef = useRef(0);
+
+  const onScratchReset = useCallback((cb: (finalCount: number, firstDir: number) => void) => {
+    scratchResetCallbacks.current.add(cb);
+  }, []);
+  const offScratchReset = useCallback((cb: (finalCount: number, firstDir: number) => void) => {
+    scratchResetCallbacks.current.delete(cb);
+  }, []);
+  const onScratchChange = useCallback((cb: (count: number, dir: number) => void) => {
+    scratchChangeCallbacks.current.add(cb);
+  }, []);
+  const offScratchChange = useCallback((cb: (count: number, dir: number) => void) => {
+    scratchChangeCallbacks.current.delete(cb);
+  }, []);
+
+  // ---- 記録完了ハンドラ ----
+  const handleChallengeComplete = useCallback((record: ChallengeRecord) => {
+    saveRecords(prev => ({
+      ...prev,
+      challengeRecords: [...prev.challengeRecords, record],
+    }));
+  }, [saveRecords]);
+
+  const handleDrillComplete = useCallback((result: DrillResult) => {
+    saveRecords(prev => ({
+      ...prev,
+      drillRecords: [...prev.drillRecords, result],
+    }));
+  }, [saveRecords]);
+
+  const handleRapidPressComplete = useCallback((result: RapidPressResult) => {
+    saveRecords(prev => ({
+      ...prev,
+      rapidPressRecords: [...prev.rapidPressRecords, result],
+    }));
+  }, [saveRecords]);
+
+  const handleExportRecords = useCallback(async () => {
+    try {
+      // AppDataDirのrecords.jsonを取得してデスクトップに保存
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const dir = await invoke<string>("get_app_data_dir");
+      const exportPath = `${dir}records_export_${timestamp}.json`;
+      await exportRecords(exportPath);
+      alert(`記録をエクスポートしました:\n${exportPath}`);
+    } catch (err) {
+      alert(`エクスポートに失敗しました: ${err}`);
+    }
+  }, []);
 
   // チャンネル取得/作成
   const getOrCreateChannel = useRef((source: string, id: string, kind: "button" | "axis"): Channel => {
@@ -645,6 +753,7 @@ export default function App() {
         keyConfigRef.current = newCfg;
         setKeyConfig(newCfg);
         saveConfig(newCfg);
+        saveConfigToFile({ keyConfig: newCfg });
         // 同じボタンの再割り当てができるよう assigningTarget はリセットしない
         return;
       }
@@ -679,6 +788,7 @@ export default function App() {
           scrLastOriginRef.current = nowJs;
           const wallNow = Date.now() - performance.now() + nowJs + startRef.current;
           localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
+          saveConfigToFile({ scrOriginWallMs: wallNow });
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
           if (challengeStateRef.current !== "running") {
@@ -691,21 +801,29 @@ export default function App() {
         }
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
+        // 日別カウント
+        dailyScratchCountRef.current += 1;
+        // 最初のスクラッチ方向を記録
+        if (scrCountRef.current === 1) scrFirstDirRef.current = dir;
+        // コールバック通知
+        for (const cb of scratchChangeCallbacks.current) cb(scrCountRef.current, dir);
 
         // チャレンジモード: スクラッチカウント
-        const addedDummy = scrCountRef.current === 1; // 659行目でダミーを追加した直後
+        const addedDummy = scrCountRef.current === 1; // ダミーを追加した直後
         if (challengeStateRef.current === "ready") {
+          // 最初の入力がスクラッチ → スクラッチチャレンジ
+          challengeInputTypeRef.current = "scr";
+          setChallengeInputType("scr");
           challengeStateRef.current = "running";
           setChallengeState("running");
           challengeStartRef.current = nowJs;
           challengeScrCountRef.current = 1;
           setChallengeScrCount(1);
           challengeIntervalsRef.current = [];
-          // ダミーエントリ(ms:0)がある場合はそれを含めた位置から開始
           challengeBarStartIdx.current = addedDummy
             ? intervalHistoryRef.current.length - 1
             : intervalHistoryRef.current.length;
-        } else if (challengeStateRef.current === "running") {
+        } else if (challengeStateRef.current === "running" && challengeInputTypeRef.current === "scr") {
           challengeScrCountRef.current += 1;
           setChallengeScrCount(challengeScrCountRef.current);
         }
@@ -765,6 +883,26 @@ export default function App() {
         if (resolved.laneId === "SCR" && resolved.direction !== undefined) {
           if (clapOnRef.current) invoke("play_clap").catch(() => {});
           handleScrDirectionChange(resolved.direction);
+        }
+        // 鍵盤入力: コールバック通知 + 日別カウント + チャレンジ連打
+        if (resolved.laneId.startsWith("KEY")) {
+          dailyKeyPressCountRef.current += 1;
+          for (const cb of keyDownCallbacks.current) cb(resolved.laneId);
+          // チャレンジモード: 最初の入力がキー → 連打チャレンジ
+          if (challengeStateRef.current === "ready") {
+            challengeInputTypeRef.current = "key";
+            setChallengeInputType("key");
+            challengeStateRef.current = "running";
+            setChallengeState("running");
+            challengeStartRef.current = nowJs;
+            challengeKeyCountRef.current = 1;
+            setChallengeKeyCount(1);
+            setChallengeKeyLabel(resolved.laneId);
+            challengeKeyLabelRef.current = resolved.laneId;
+          } else if (challengeStateRef.current === "running" && challengeInputTypeRef.current === "key" && resolved.laneId === challengeKeyLabelRef.current) {
+            challengeKeyCountRef.current += 1;
+            setChallengeKeyCount(challengeKeyCountRef.current);
+          }
         }
       } else if (ev.kind === "ButtonUp") {
         const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
@@ -896,6 +1034,8 @@ export default function App() {
       });
 
       if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > SCR_RESET_MS) {
+        const finalCount = scrCountRef.current;
+        const firstDir = scrFirstDirRef.current;
         scrCountRef.current = 0;
         scrLastDirRef.current = 0;
         scrLastEventTimeRef.current = -Infinity;
@@ -904,6 +1044,8 @@ export default function App() {
         scrIntervalHistRef.current = [];
         setScrCount(0);
         setScrActive(false);
+        // ドリルモード用コールバック通知
+        for (const cb of scratchResetCallbacks.current) cb(finalCount, firstDir);
       }
 
       const cutoff = nowMs - SPAN_RETAIN;
@@ -944,10 +1086,13 @@ export default function App() {
           : crs === "done"
           ? { startMs: challengeStartRef.current, endMs: challengeEndRef.current }
           : null;
+        const activeLane = (challengeStateRef.current === "running" || challengeStateRef.current === "done")
+          ? (challengeInputTypeRef.current === "key" ? challengeKeyLabelRef.current : challengeInputTypeRef.current === "scr" ? "SCR" : null)
+          : null;
         drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
           canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
           scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
-          greenNumRef.current * 1000 / 600, cRange);
+          greenNumRef.current * 1000 / 600, cRange, activeLane);
       }
       if (chartCtxRef.current && chartCanvasRef.current) {
         const cs = challengeStateRef.current;
@@ -984,9 +1129,32 @@ export default function App() {
             : null;
           const nd = avgMs !== null && bpmRef.current > 0
             ? nearestNoteDivision(avgMs, bpmRef.current) : null;
-          const cnt = challengeScrCountRef.current;
           const dur = challengeDurationRef.current;
-          setChallengeResult({ count: cnt, duration: dur, avgMs, noteDivision: nd });
+          if (challengeInputTypeRef.current === "key") {
+            // 連打チャレンジ完了
+            const cnt = challengeKeyCountRef.current;
+            setChallengeResult({ count: cnt, duration: dur, avgMs: null, noteDivision: null });
+            const record: RapidPressResult = {
+              date: new Date().toISOString(),
+              duration: dur,
+              pressCount: cnt,
+              keyLabel: challengeKeyLabelRef.current || "KEY",
+            };
+            handleRapidPressComplete(record);
+          } else {
+            // スクラッチチャレンジ完了
+            const cnt = challengeScrCountRef.current;
+            setChallengeResult({ count: cnt, duration: dur, avgMs, noteDivision: nd });
+            const record: ChallengeRecord = {
+              date: new Date().toISOString(),
+              duration: dur,
+              scratchCount: cnt,
+              avgIntervalMs: avgMs,
+              bpm: bpmRef.current,
+              noteDivision: nd,
+            };
+            handleChallengeComplete(record);
+          }
         } else {
           setChallengeTimeLeft(remaining);
         }
@@ -1083,20 +1251,17 @@ export default function App() {
   const clearBinding = (target: string) => {
     const newCfg = { ...keyConfigRef.current, [target]: null };
     keyConfigRef.current = newCfg; setKeyConfig(newCfg); saveConfig(newCfg);
+    saveConfigToFile({ keyConfig: newCfg });
   };
   const clearAll = () => {
     const newCfg: KeyConfig = {};
     keyConfigRef.current = newCfg; setKeyConfig(newCfg); saveConfig(newCfg);
+    saveConfigToFile({ keyConfig: newCfg });
     assigningRef.current = null; setAssigningTarget(null);
   };
   const closeConfig = () => { assigningRef.current = null; setAssigningTarget(null); setShowConfig(false); };
 
-  const KEY_DEFS = [
-    { id: "KEY1", label: "1", black: false }, { id: "KEY2", label: "2", black: true  },
-    { id: "KEY3", label: "3", black: false }, { id: "KEY4", label: "4", black: true  },
-    { id: "KEY5", label: "5", black: false }, { id: "KEY6", label: "6", black: true  },
-    { id: "KEY7", label: "7", black: false },
-  ];
+  // KEY_DEFS imported from constants.ts
 
   return (
     <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4 items-center">
@@ -1126,11 +1291,35 @@ export default function App() {
         </Button>
       </div>
 
-      {/* メイン行: チャレンジ + canvas + スライダー + 設定パネル */}
+      {/* モードタブ */}
+      <div className="flex gap-1">
+        {([
+          { id: "free" as AppMode, label: "Free" },
+          { id: "challenge" as AppMode, label: "Challenge" },
+          { id: "drill" as AppMode, label: "Drill" },
+        ]).map(m => (
+          <Button
+            key={m.id}
+            size="sm"
+            variant={appMode === m.id ? "default" : "outline"}
+            className="text-xs"
+            onClick={() => setAppMode(m.id)}
+          >
+            {m.label}
+          </Button>
+        ))}
+      </div>
+
+      {/* メイン行: モード別パネル + canvas + スライダー + 設定パネル */}
       <div className="flex items-start gap-2 overflow-x-auto">
 
         {/* チャレンジモード */}
-        <Card className={`h-fit shrink-0 w-[160px] ${challengeState === "running" ? "border-orange-500/50 shadow-[0_0_8px_rgba(255,165,0,0.2)]" : ""}`}>
+        {appMode === "challenge" && (
+        <Card className={`h-fit shrink-0 w-[160px] ${challengeState === "running"
+          ? (challengeInputType === "key"
+            ? "border-cyan-500/50 shadow-[0_0_8px_rgba(6,182,212,0.2)]"
+            : "border-orange-500/50 shadow-[0_0_8px_rgba(255,165,0,0.2)]")
+          : ""}`}>
           <CardHeader className="pb-2 pt-3 px-3">
             <CardTitle className="text-xs text-muted-foreground">Challenge</CardTitle>
           </CardHeader>
@@ -1151,6 +1340,12 @@ export default function App() {
                     setChallengeState("ready");
                     challengeScrCountRef.current = 0;
                     setChallengeScrCount(0);
+                    challengeKeyCountRef.current = 0;
+                    setChallengeKeyCount(0);
+                    challengeInputTypeRef.current = null;
+                    setChallengeInputType(null);
+                    setChallengeKeyLabel("");
+                    challengeKeyLabelRef.current = "";
                     setChallengeResult(null);
                   }}
                 >
@@ -1161,7 +1356,8 @@ export default function App() {
 
             {/* タイマー表示 */}
             <div className={`font-mono text-3xl font-bold tabular-nums text-center w-full ${
-              challengeState === "running" ? "text-orange-400"
+              challengeState === "running"
+                ? (challengeInputType === "key" ? "text-cyan-400" : "text-orange-400")
                 : challengeState === "ready" ? "text-zinc-500"
                 : challengeState === "done" ? "text-zinc-500"
                 : "text-zinc-700"
@@ -1175,16 +1371,20 @@ export default function App() {
                 : "0.00"}
             </div>
 
-            {/* スクラッチ回数 */}
+            {/* カウント表示（SCR/KEY自動判別） */}
             <div className="text-center w-full">
-              <span className="text-[10px] text-muted-foreground">Scratches</span>
+              <span className="text-[10px] text-muted-foreground">
+                {challengeInputType === "key" ? "Presses" : "Scratches"}
+              </span>
               <div className={`font-mono text-3xl font-bold tabular-nums ${
-                challengeState === "running" ? "text-yellow-300"
-                  : challengeState === "done" ? "text-yellow-300"
+                challengeState === "running"
+                  ? (challengeInputType === "key" ? "text-cyan-300" : "text-yellow-300")
+                  : challengeState === "done"
+                  ? (challengeInputType === "key" ? "text-cyan-300" : "text-yellow-300")
                   : "text-zinc-700"
               }`}>
                 {challengeState === "running"
-                  ? challengeScrCount
+                  ? (challengeInputType === "key" ? challengeKeyCount : challengeScrCount)
                   : challengeState === "done" && challengeResult
                   ? challengeResult.count
                   : "—"}
@@ -1195,7 +1395,7 @@ export default function App() {
             {challengeState === "ready" && (
               <>
                 <span className="text-xs text-muted-foreground animate-pulse">
-                  スクラッチで開始
+                  入力で開始
                 </span>
                 <Button
                   size="sm" variant="ghost"
@@ -1220,6 +1420,10 @@ export default function App() {
                   setChallengeState("idle");
                   challengeScrCountRef.current = 0;
                   setChallengeScrCount(0);
+                  challengeKeyCountRef.current = 0;
+                  setChallengeKeyCount(0);
+                  challengeInputTypeRef.current = null;
+                  setChallengeInputType(null);
                 }}
               >
                 リセット
@@ -1230,25 +1434,35 @@ export default function App() {
             {challengeState === "done" && challengeResult && (
               <div className="text-center flex flex-col gap-1 w-full">
                 <div className="text-base font-bold text-green-400">FINISH!</div>
-                {challengeResult.avgMs !== null && (
-                  <div className="flex flex-col gap-0">
-                    <span className="text-xs text-zinc-400">
-                      Avg: {challengeResult.avgMs}ms
-                    </span>
-                    {challengeResult.noteDivision && (
-                      <span className="text-xs text-zinc-500">
-                        (BPM{bpm} {challengeResult.noteDivision})
+                {challengeInputType === "key" ? (
+                  <span className="text-xs text-zinc-400">
+                    {(challengeResult.count / challengeResult.duration).toFixed(1)} 回/秒
+                  </span>
+                ) : (
+                  challengeResult.avgMs !== null && (
+                    <div className="flex flex-col gap-0">
+                      <span className="text-xs text-zinc-400">
+                        Avg: {challengeResult.avgMs}ms
                       </span>
-                    )}
-                  </div>
+                      {challengeResult.noteDivision && (
+                        <span className="text-xs text-zinc-500">
+                          (BPM{bpm} {challengeResult.noteDivision})
+                        </span>
+                      )}
+                    </div>
+                  )
                 )}
                 <a
                   href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
-                    `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチしたよ！`
-                    + (challengeResult.avgMs !== null
-                      ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? ` (BPM${bpm} ${challengeResult.noteDivision})` : "")
-                      : "")
-                    + "\n#daken_trainer"
+                    challengeInputType === "key"
+                      ? `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回キーを叩いたよ！`
+                        + `\n${(challengeResult.count / challengeResult.duration).toFixed(1)} 回/秒`
+                        + "\n#daken_trainer"
+                      : `${challengeResult.duration === 60 ? "1m" : `${challengeResult.duration}s`}で${challengeResult.count}回スクラッチしたよ！`
+                        + (challengeResult.avgMs !== null
+                          ? `\nAvg: ${challengeResult.avgMs}ms` + (challengeResult.noteDivision ? ` (BPM${bpm} ${challengeResult.noteDivision})` : "")
+                          : "")
+                        + "\n#daken_trainer"
                   )}`}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -1260,6 +1474,23 @@ export default function App() {
             )}
           </CardContent>
         </Card>
+        )}
+
+        {/* ドリルモード */}
+        {appMode === "drill" && (
+          <DrillMode
+            onScratchReset={onScratchReset}
+            offScratchReset={offScratchReset}
+            onScratchChange={onScratchChange}
+            offScratchChange={offScratchChange}
+            onComplete={handleDrillComplete}
+          />
+        )}
+
+        {/* Freeモード: レーン位置固定用スペーサー */}
+        {appMode === "free" && (
+          <div className="shrink-0 w-[160px]" />
+        )}
 
         {/* Canvas */}
         <canvas
@@ -1294,6 +1525,7 @@ export default function App() {
                 const s = v as "1P" | "2P";
                 setSide(s); sideRef.current = s;
                 localStorage.setItem(SIDE_KEY, s);
+                saveConfigToFile({ side: s });
               }}
               className="flex gap-3"
             >
@@ -1318,6 +1550,7 @@ export default function App() {
                   if (!isNaN(v) && v >= 100 && v <= 3000) {
                     setGreenNum(v); greenNumRef.current = v;
                     localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(v));
+                    saveConfigToFile({ greenNum: v });
                   }
                 }}
                 onBlur={e => {
@@ -1326,6 +1559,7 @@ export default function App() {
                   setGreenNum(resolved); greenNumRef.current = resolved;
                   setGreenNumText(String(resolved));
                   localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(resolved));
+                  saveConfigToFile({ greenNum: resolved });
                 }}
                 className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
               />
@@ -1340,6 +1574,7 @@ export default function App() {
                 const m = v as GridMode;
                 setGridMode(m); gridModeRef.current = m;
                 localStorage.setItem(GRID_MODE_STORAGE_KEY, m);
+                saveConfigToFile({ gridMode: m });
               }}
               className="flex flex-col gap-1"
             >
@@ -1367,6 +1602,7 @@ export default function App() {
                     setBpm(v); bpmRef.current = v;
                     metroNextBeatRef.current = null;
                     localStorage.setItem(BPM_STORAGE_KEY, String(v));
+                    saveConfigToFile({ bpm: v });
                   }
                 }}
                 onBlur={e => {
@@ -1376,6 +1612,7 @@ export default function App() {
                   setBpmText(String(resolved));
                   metroNextBeatRef.current = null;
                   localStorage.setItem(BPM_STORAGE_KEY, String(resolved));
+                  saveConfigToFile({ bpm: resolved });
                 }}
                 className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
               />
@@ -1390,6 +1627,7 @@ export default function App() {
                   const on = !!checked;
                   setClapOn(on); clapOnRef.current = on;
                   localStorage.setItem(CLAP_ON_KEY, on ? "1" : "0");
+                  saveConfigToFile({ clapOn: on });
                 }}
               />
               <Label htmlFor="clap-on" className={`text-xs cursor-pointer ${clapOn ? "text-primary" : "text-muted-foreground"}`}>
@@ -1409,6 +1647,7 @@ export default function App() {
                     setMetroOn(on); metroOnRef.current = on;
                     metroNextBeatRef.current = null;
                     localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
+                    saveConfigToFile({ metronome: { on, div: metroDivRef.current, vol: metroVolRef.current } });
                     if (on && !audioCtxRef.current) audioCtxRef.current = new AudioContext();
                     if (on && audioCtxRef.current?.state === "suspended") audioCtxRef.current.resume();
                   }}
@@ -1424,6 +1663,7 @@ export default function App() {
                   setMetroDiv(d); metroDivRef.current = d;
                   metroNextBeatRef.current = null;
                   localStorage.setItem(METRO_DIV_KEY, v);
+                  saveConfigToFile({ metronome: { on: metroOnRef.current, div: d, vol: metroVolRef.current } });
                 }}
                 className="flex gap-3"
               >
@@ -1442,6 +1682,7 @@ export default function App() {
                   onValueChange={([v]) => {
                     setMetroVol(v); metroVolRef.current = v;
                     localStorage.setItem(METRO_VOL_KEY, String(v));
+                    saveConfigToFile({ metronome: { on: metroOnRef.current, div: metroDivRef.current, vol: v } });
                   }}
                   className="w-20"
                 />
@@ -1538,6 +1779,9 @@ export default function App() {
           </div>
         </CardContent>
       </Card>
+
+      {/* 記録表示 */}
+      <RecordsView records={appRecords} onExport={handleExportRecords} />
 
       {/* キーコンフィグ ダイアログ */}
       <Dialog open={showConfig} onOpenChange={(open) => { if (!open) closeConfig(); }}>
