@@ -250,6 +250,103 @@ function drawTimeline(
 
 // ---- 棒グラフ Canvas 描画 ---------------------------------------------------
 
+// 横スクロール時もY軸ラベルが見えるよう、スクロール領域の外に固定overlayで描画する
+function drawYAxisLabels(
+  ctx: CanvasRenderingContext2D,
+  h: number,
+  bpm: number,
+  scaleMode: "log" | "linear",
+) {
+  const w = CHART_PAD_L;
+  // 背景: バーや線が overlay 領域の裏に来ても透けないようマスク
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, w, h);
+
+  const PAD_T = 4;
+  const PAD_B = 18;
+  const plotH = h - PAD_T - PAD_B;
+  const plotX = CHART_PAD_L;
+
+  // Y軸ティック (ラベルの右、軸エッジ手前まで短い横線)
+  const TICK_LEN = 4;
+  const drawYTick = (y: number, color: string) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(plotX - TICK_LEN, y);
+    ctx.lineTo(plotX, y);
+    ctx.stroke();
+  };
+
+  if (scaleMode === "linear") {
+    const linMinMs = 1;
+    const linMaxMs = SCR_RESET_MS - 1;
+    const msToY = (ms: number) => {
+      const clamped = Math.max(linMinMs, Math.min(linMaxMs, ms));
+      const ratio = (clamped - linMinMs) / (linMaxMs - linMinMs);
+      return PAD_T + Math.round(ratio * plotH);
+    };
+    const TICK_STEP_MS = 100;
+    const TICK_COLOR = "#888";
+    ctx.font = "bold 11px monospace";
+    ctx.textAlign = "right";
+    for (let ms = TICK_STEP_MS; ms < linMaxMs; ms += TICK_STEP_MS) {
+      const y = msToY(ms);
+      if (y < PAD_T || y > PAD_T + plotH) continue;
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeText(`${ms}`, plotX - 6, y + 4);
+      ctx.fillStyle = TICK_COLOR;
+      ctx.fillText(`${ms}`, plotX - 6, y + 4);
+      drawYTick(y, "#666");
+    }
+    // 単位 (ms): 一回り大きく
+    ctx.font = "bold 11px monospace";
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    ctx.strokeText("ms", plotX - 6, PAD_T + 10);
+    ctx.fillStyle = "#aaa";
+    ctx.fillText("ms", plotX - 6, PAD_T + 10);
+    ctx.textAlign = "left";
+    ctx.lineJoin = "miter";
+  } else {
+    const ALL_DIVS = Array.from({ length: 29 }, (_, i) => i + 4);
+    const LABELED_DIVS = new Set([4, 8, 12, 16, 24, 32]);
+    const beatMs = bpm > 0 ? 60000 / bpm : 0;
+    const noteRefMs = ALL_DIVS.map(d => ({ d, ms: beatMs > 0 ? beatMs / (d / 4) : 0 }));
+    const lastMs = noteRefMs.at(-1)?.ms ?? 0;
+    const logMinMs = lastMs > 0 ? lastMs * 0.5 : 10;
+    const logMaxMs = noteRefMs[0]?.ms > 0 ? noteRefMs[0].ms * 1.5 : 1000;
+    const msToY = (ms: number) => {
+      const clamped = Math.max(logMinMs, Math.min(logMaxMs, ms));
+      const ratio = (Math.log(clamped) - Math.log(logMinMs)) / (Math.log(logMaxMs) - Math.log(logMinMs));
+      return PAD_T + Math.round(ratio * plotH);
+    };
+    ctx.font = "bold 11px monospace";
+    ctx.textAlign = "right";
+    for (const { d, ms } of noteRefMs) {
+      if (ms <= 0) continue;
+      if (!LABELED_DIVS.has(d)) continue;
+      const y = msToY(ms);
+      if (y < PAD_T || y > PAD_T + plotH) continue;
+      // log: 線・ラベル・ティックすべて NOTE_COLOR(d) で統一
+      const color = noteColor(d);
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeText(`${d}`, plotX - 6, y + 4);
+      ctx.fillStyle = color;
+      ctx.fillText(`${d}`, plotX - 6, y + 4);
+      drawYTick(y, color);
+    }
+    ctx.textAlign = "left";
+    ctx.lineJoin = "miter";
+  }
+}
+
 function drawBarChart(
   ctx: CanvasRenderingContext2D,
   intervals: IntervalEntry[],
@@ -282,7 +379,7 @@ function drawBarChart(
   // レイアウト
   // 上: PAD_T, 下: PAD_B(X軸ラベル), 左: CHART_PAD_L(Y軸ラベル)
   const PAD_T = 4;
-  const PAD_B = 14;
+  const PAD_B = 18;
   const plotX = CHART_PAD_L;      // バー描画開始X
   const plotH = h - PAD_T - PAD_B; // バー描画高さ
 
@@ -301,21 +398,14 @@ function drawBarChart(
   const count = intervals.length;
   const barW = CHART_BAR_W;
 
-  // log モードのラベル色を明るくするユーティリティ (線色は note color のまま)
-  const brighten = (rgbStr: string, add: number) => {
-    const nums = rgbStr.match(/\d+/g)?.map(Number) ?? [128, 128, 128];
-    return `rgb(${Math.min(255, nums[0] + add)},${Math.min(255, nums[1] + add)},${Math.min(255, nums[2] + add)})`;
-  };
-
-  // Y軸リファレンスライン
+  // Y軸リファレンスライン (ラベルは drawYAxisLabels に分離)
   if (scaleMode === "linear") {
-    // 100ms 間隔の時間目盛り
+    // 100ms 間隔の時間目盛り (lineのみ)
     const TICK_STEP_MS = 100;
     const TICK_COLOR = "#888";
     for (let ms = TICK_STEP_MS; ms < linMaxMs; ms += TICK_STEP_MS) {
       const y = msToY(ms);
       if (y < PAD_T || y > PAD_T + plotH) continue;
-      // ライン
       ctx.strokeStyle = TICK_COLOR;
       ctx.globalAlpha = 0.5;
       ctx.setLineDash([4, 3]);
@@ -323,58 +413,22 @@ function drawBarChart(
       ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
       ctx.globalAlpha = 1.0;
       ctx.setLineDash([]);
-      // ラベル
-      ctx.font = "bold 11px monospace";
-      ctx.textAlign = "right";
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 4;
-      ctx.lineJoin = "round";
-      ctx.strokeText(`${ms}`, plotX - 6, y + 4);
-      ctx.fillStyle = TICK_COLOR;
-      ctx.fillText(`${ms}`, plotX - 6, y + 4);
-      ctx.textAlign = "left";
-      ctx.lineJoin = "miter";
     }
-    // 縦軸の単位表示 (ms): y軸上端付近に小さく表示
-    ctx.font = "9px monospace";
-    ctx.textAlign = "right";
-    ctx.strokeStyle = "#000";
-    ctx.lineWidth = 3;
-    ctx.lineJoin = "round";
-    ctx.strokeText("ms", plotX - 6, PAD_T + 8);
-    ctx.fillStyle = "#aaa";
-    ctx.fillText("ms", plotX - 6, PAD_T + 8);
-    ctx.textAlign = "left";
-    ctx.lineJoin = "miter";
   } else {
-    // log: 音符区分リファレンスライン（ラベル付きのみ描画）
+    // log: 音符区分リファレンスライン (lineのみ)
     for (const { d, ms } of noteRefMs) {
       if (ms <= 0) continue;
       const isLabeled = LABELED_DIVS.has(d);
       if (!isLabeled) continue;
       const y = msToY(ms);
       if (y < PAD_T || y > PAD_T + plotH) continue;
-      const lineColor = NOTE_COLOR(d);
-      const labelColor = brighten(lineColor, 80); // ラベルだけ明るく
-      // ライン（バー描画エリアのみ） - 色はそのまま
-      ctx.strokeStyle = lineColor;
+      ctx.strokeStyle = NOTE_COLOR(d);
       ctx.globalAlpha = 0.75;
       ctx.setLineDash([4, 3]);
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
       ctx.globalAlpha = 1.0;
       ctx.setLineDash([]);
-      // ラベル（左側）- アウトライン付きで視認性向上 + 明るい色
-      ctx.font = "bold 11px monospace";
-      ctx.textAlign = "right";
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 4;
-      ctx.lineJoin = "round";
-      ctx.strokeText(`${d}`, plotX - 6, y + 4);
-      ctx.fillStyle = labelColor;
-      ctx.fillText(`${d}`, plotX - 6, y + 4);
-      ctx.textAlign = "left";
-      ctx.lineJoin = "miter";
     }
   }
 
@@ -417,7 +471,7 @@ function drawBarChart(
 
   // X軸ラベル（枚数）: 100以下は1,10,20...50、100超えは50単位
   ctx.fillStyle = "#aaa";
-  ctx.font = "9px monospace";
+  ctx.font = "bold 11px monospace";
   ctx.textAlign = "center";
   const tickStep = 10;
   const tickList = [1];
@@ -426,10 +480,10 @@ function drawBarChart(
     if (n > count) break;
     const idx = n - 1;
     const x = plotX + idx * barW + barW / 2;
-    ctx.strokeStyle = "#444";
+    ctx.strokeStyle = "#666";
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, PAD_T + plotH); ctx.lineTo(x, PAD_T + plotH + 3); ctx.stroke();
-    ctx.fillText(String(n), x, h - 2);
+    ctx.beginPath(); ctx.moveTo(x, PAD_T + plotH); ctx.lineTo(x, PAD_T + plotH + 4); ctx.stroke();
+    ctx.fillText(String(n), x, h - 3);
   }
 
   // チャレンジ範囲インジケータ（棒の下端に横線）
@@ -561,6 +615,8 @@ export default function App() {
   const intervalHistoryRef = useRef<IntervalEntry[]>([]);
   const chartCanvasRef = useRef<HTMLCanvasElement>(null);
   const chartCtxRef    = useRef<CanvasRenderingContext2D | null>(null);
+  const axisCanvasRef  = useRef<HTMLCanvasElement>(null);
+  const axisCtxRef     = useRef<CanvasRenderingContext2D | null>(null);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartWidthRef = useRef(CHART_W);
   const [chartTooltip, setChartTooltip] = useState<{ x: number; y: number; entry: IntervalEntry; idx: number } | null>(null);
@@ -596,6 +652,11 @@ export default function App() {
   // チャートスケール (log / linear)
   const [chartScale, setChartScale] = useState<"log" | "linear">("linear");
   const chartScaleRef = useRef<"log" | "linear">("linear");
+
+  // scale / bpm が変わったら Y軸ラベル overlay を再描画
+  useEffect(() => {
+    if (axisCtxRef.current) drawYAxisLabels(axisCtxRef.current, CHART_H, bpm, chartScale);
+  }, [chartScale, bpm]);
 
   // ---- モードタブ ----
   type AppMode = "free" | "challenge" | "drill";
@@ -1000,6 +1061,10 @@ export default function App() {
   useEffect(() => {
     if (canvasRef.current) ctxRef.current = canvasRef.current.getContext("2d");
     if (chartCanvasRef.current) chartCtxRef.current = chartCanvasRef.current.getContext("2d");
+    if (axisCanvasRef.current) {
+      axisCtxRef.current = axisCanvasRef.current.getContext("2d");
+      if (axisCtxRef.current) drawYAxisLabels(axisCtxRef.current, CHART_H, bpmRef.current, chartScaleRef.current);
+    }
     if (metroOnRef.current) {
       const ac = new AudioContext();
       audioCtxRef.current = ac;
@@ -1811,55 +1876,64 @@ export default function App() {
           </div>
         </CardHeader>
         <CardContent className="px-3 pb-3">
-          <div
-            className="relative overflow-x-auto"
-            ref={chartContainerRef}
-            onWheel={(e) => {
-              e.preventDefault();
-              if (chartContainerRef.current) {
-                chartContainerRef.current.scrollLeft += e.deltaY;
-              }
-            }}
-          >
-            <canvas
-              ref={chartCanvasRef}
-              width={CHART_W}
-              height={CHART_H}
-              className="block"
-              onMouseMove={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const intervals = intervalHistoryRef.current;
-                if (intervals.length === 0) return;
-                const barW = CHART_BAR_W;
-                const barIdx = Math.floor((x - CHART_PAD_L) / barW);
-                if (barIdx >= 0 && barIdx < intervals.length) {
-                  const entry = intervals[barIdx];
-                  const barCenterX = CHART_PAD_L + barIdx * barW + barW / 2;
-                  setChartTooltip({ x: barCenterX, y: e.clientY - rect.top - 8, entry, idx: barIdx + 1 });
-                } else {
-                  setChartTooltip(null);
+          <div className="relative">
+            <div
+              className="relative overflow-x-auto"
+              ref={chartContainerRef}
+              onWheel={(e) => {
+                e.preventDefault();
+                if (chartContainerRef.current) {
+                  chartContainerRef.current.scrollLeft += e.deltaY;
                 }
               }}
-              onMouseLeave={() => setChartTooltip(null)}
-            />
-            {chartTooltip && (
-              <div
-                className="pointer-events-none absolute z-10 border border-zinc-600 rounded px-2 py-1 text-xs whitespace-nowrap -translate-x-1/2"
-                style={{ left: chartTooltip.x, top: chartTooltip.y - 36, background: "rgba(20,20,20,0.95)" }}
-              >
-                <span className="text-muted-foreground">#{chartTooltip.idx}</span>
-                <span style={{ color: chartTooltip.entry.dir > 0 ? "#4f8" : "#fa4" }} className="ml-2">
-                  {chartTooltip.entry.dir > 0 ? "↷" : "↶"}
-                </span>
-                <span className="ml-1 text-foreground">{chartTooltip.entry.ms}ms</span>
-                {bpm > 0 && (
-                  <span className="ml-2 text-cyan-300">
-                    {nearestNoteDivision(chartTooltip.entry.ms, bpm)}
+            >
+              <canvas
+                ref={chartCanvasRef}
+                width={CHART_W}
+                height={CHART_H}
+                className="block mb-1"
+                onMouseMove={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const x = e.clientX - rect.left;
+                  const intervals = intervalHistoryRef.current;
+                  if (intervals.length === 0) return;
+                  const barW = CHART_BAR_W;
+                  const barIdx = Math.floor((x - CHART_PAD_L) / barW);
+                  if (barIdx >= 0 && barIdx < intervals.length) {
+                    const entry = intervals[barIdx];
+                    const barCenterX = CHART_PAD_L + barIdx * barW + barW / 2;
+                    setChartTooltip({ x: barCenterX, y: e.clientY - rect.top - 8, entry, idx: barIdx + 1 });
+                  } else {
+                    setChartTooltip(null);
+                  }
+                }}
+                onMouseLeave={() => setChartTooltip(null)}
+              />
+              {chartTooltip && (
+                <div
+                  className="pointer-events-none absolute z-10 border border-zinc-600 rounded px-2 py-1 text-xs whitespace-nowrap -translate-x-1/2"
+                  style={{ left: chartTooltip.x, top: chartTooltip.y - 36, background: "rgba(20,20,20,0.95)" }}
+                >
+                  <span className="text-muted-foreground">#{chartTooltip.idx}</span>
+                  <span style={{ color: chartTooltip.entry.dir > 0 ? "#4f8" : "#fa4" }} className="ml-2">
+                    {chartTooltip.entry.dir > 0 ? "↷" : "↶"}
                   </span>
-                )}
-              </div>
-            )}
+                  <span className="ml-1 text-foreground">{chartTooltip.entry.ms}ms</span>
+                  {bpm > 0 && (
+                    <span className="ml-2 text-cyan-300">
+                      {nearestNoteDivision(chartTooltip.entry.ms, bpm)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* Y軸ラベル overlay: 横スクロールしても常に左端に固定表示 */}
+            <canvas
+              ref={axisCanvasRef}
+              width={CHART_PAD_L}
+              height={CHART_H}
+              className="absolute left-0 top-0 pointer-events-none"
+            />
           </div>
         </CardContent>
       </Card>
