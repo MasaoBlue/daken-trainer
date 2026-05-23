@@ -93,12 +93,13 @@ export type ConstantState = "idle" | "ready" | "running" | "done";
 export interface ConstantResult {
   date: string;
   bpm: number;
-  noteDivision: 4 | 8 | 16 | 32;
+  noteDivision: 8 | 12 | 16 | 24 | 32;
   targetIntervalMs: number;
   targetCount: number | null;     // null = 無限モード
   achievedCount: number;          // 成功した枚数
   success: boolean;               // targetCount を達成したか
-  failedIntervalMs: number | null; // 失敗した interval (success なら null)
+  endReason: "success" | "deviation" | "timeout"; // 終了理由
+  failedIntervalMs: number | null; // 失敗した interval (deviation 時のみ)
   failedDeviationMs: number | null; // target からのズレ (符号: + 遅すぎ / - 速すぎ)
   avgIntervalMs: number | null;   // 成功 interval の平均
 }
@@ -121,6 +122,8 @@ export interface AppConfig {
   scrOriginWallMs: number | null;
   phoenixWan: boolean;
   chartScale: "log" | "linear";
+  scrResetMs: number; // 連皿しきい値 (ms)。500/400/300 から選択
+  appMode: "free" | "challenge" | "drill" | "constant";
 }
 
 // ---- 記録型 ----------------------------------------------------------------

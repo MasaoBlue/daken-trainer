@@ -21,7 +21,7 @@ pub fn write_json(path: &PathBuf, value: &Value) -> Result<(), String> {
 
 pub fn default_config() -> Value {
     json!({
-        "version": 3,
+        "version": 5,
         "keyConfig": {},
         "bpm": 150,
         "greenNum": 1000,
@@ -35,7 +35,9 @@ pub fn default_config() -> Value {
         "clapOn": true,
         "scrOriginWallMs": null,
         "phoenixWan": false,
-        "chartScale": "linear"
+        "chartScale": "linear",
+        "scrResetMs": 500,
+        "appMode": "free"
     })
 }
 
@@ -89,7 +91,27 @@ pub fn migrate_config(mut value: Value) -> Value {
         }
     }
 
-    // Future migrations: v3 -> v4, etc.
+    // v3 -> v4: add scrResetMs
+    if version < 4 {
+        value["version"] = json!(4);
+        if let Some(val_obj) = value.as_object_mut() {
+            if !val_obj.contains_key("scrResetMs") {
+                val_obj.insert("scrResetMs".to_string(), json!(500));
+            }
+        }
+    }
+
+    // v4 -> v5: add appMode
+    if version < 5 {
+        value["version"] = json!(5);
+        if let Some(val_obj) = value.as_object_mut() {
+            if !val_obj.contains_key("appMode") {
+                val_obj.insert("appMode".to_string(), json!("free"));
+            }
+        }
+    }
+
+    // Future migrations: v5 -> v6, etc.
 
     value
 }

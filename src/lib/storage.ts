@@ -79,6 +79,8 @@ export function migrateFromLocalStorage(): AppConfig | null {
     scrOriginWallMs: scrOriginRaw ? parseFloat(scrOriginRaw) : null,
     phoenixWan: false,
     chartScale: "linear",
+    scrResetMs: 500,
+    appMode: "free",
   };
 
   return config;

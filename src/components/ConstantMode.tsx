@@ -8,12 +8,16 @@ import type { ConstantState, ConstantResult } from "../types";
 interface ConstantModeProps {
   onScratchInterval: (cb: (intervalMs: number, dir: number) => void) => void;
   offScratchInterval: (cb: (intervalMs: number, dir: number) => void) => void;
+  onScratchChange: (cb: (count: number, dir: number) => void) => void;
+  offScratchChange: (cb: (count: number, dir: number) => void) => void;
+  onScratchReset: (cb: (finalCount: number, firstDir: number) => void) => void;
+  offScratchReset: (cb: (finalCount: number, firstDir: number) => void) => void;
   setScrResetMs: (ms: number | null) => void;
   onComplete: (result: ConstantResult) => void;
   bpm: number;
 }
 
-const NOTE_DIVS = [4, 8, 16, 32] as const;
+const NOTE_DIVS = [8, 12, 16, 24, 32] as const;
 type NoteDiv = (typeof NOTE_DIVS)[number];
 const THRESHOLD_RATIO = 0.30; // ±30% を許容
 
@@ -24,6 +28,10 @@ function noteDivLabel(d: NoteDiv): string {
 export default function ConstantMode({
   onScratchInterval,
   offScratchInterval,
+  onScratchChange,
+  offScratchChange,
+  onScratchReset,
+  offScratchReset,
   setScrResetMs,
   onComplete,
   bpm,
@@ -36,9 +44,9 @@ export default function ConstantMode({
 
   const [useTarget, setUseTarget] = useState(false);
   const useTargetRef = useRef(false);
-  const [targetCount, setTargetCount] = useState(50);
-  const [targetCountText, setTargetCountText] = useState("50");
-  const targetCountRef = useRef(50);
+  const [targetCount, setTargetCount] = useState(16);
+  const [targetCountText, setTargetCountText] = useState("16");
+  const targetCountRef = useRef(16);
 
   // 現在 BPM を ref で持ち続ける
   const bpmRef = useRef(bpm);
@@ -49,12 +57,13 @@ export default function ConstantMode({
   const [achieved, setAchieved] = useState(0);
   const intervalsRef = useRef<number[]>([]);
   const [lastInterval, setLastInterval] = useState<number | null>(null);
+  const [avgInterval, setAvgInterval] = useState<number | null>(null);
 
   const [result, setResult] = useState<ConstantResult | null>(null);
 
   const targetIntervalMs = () => 60000 / bpmRef.current / (noteDivRef.current / 4);
 
-  const stop = useCallback((failedIntervalMs: number | null, failedDeviationMs: number | null, success: boolean) => {
+  const stop = useCallback((endReason: "success" | "deviation" | "timeout", failedIntervalMs: number | null, failedDeviationMs: number | null) => {
     stateRef.current = "done";
     setState("done");
     setScrResetMs(null); // 既定値に戻す
@@ -71,7 +80,8 @@ export default function ConstantMode({
       targetIntervalMs: Math.round(target),
       targetCount: useTargetRef.current ? targetCountRef.current : null,
       achievedCount: achievedRef.current,
-      success,
+      success: endReason === "success",
+      endReason,
       failedIntervalMs,
       failedDeviationMs,
       avgIntervalMs: avg,
@@ -95,8 +105,8 @@ export default function ConstantMode({
     setLastInterval(intervalMs);
 
     if (ratio > THRESHOLD_RATIO) {
-      // 失敗
-      stop(intervalMs, Math.round(deviation), false);
+      // 失敗 (ズレ過大)
+      stop("deviation", intervalMs, Math.round(deviation));
       return;
     }
 
@@ -104,29 +114,64 @@ export default function ConstantMode({
     achievedRef.current += 1;
     setAchieved(achievedRef.current);
     intervalsRef.current.push(intervalMs);
+    const sum = intervalsRef.current.reduce((s, v) => s + v, 0);
+    setAvgInterval(Math.round(sum / intervalsRef.current.length));
 
     if (useTargetRef.current && achievedRef.current >= targetCountRef.current) {
-      stop(null, null, true);
+      stop("success", null, null);
     }
   }, [stop]);
+
+  // 連皿が途切れたら (SCR_RESET 発火) timeout として停止
+  const onReset = useCallback(() => {
+    if (stateRef.current === "running") {
+      stop("timeout", null, null);
+    }
+  }, [stop]);
+  useEffect(() => {
+    onScratchReset(onReset);
+    return () => offScratchReset(onReset);
+  }, [onScratchReset, offScratchReset, onReset]);
 
   useEffect(() => {
     onScratchInterval(onInterval);
     return () => offScratchInterval(onInterval);
   }, [onScratchInterval, offScratchInterval, onInterval]);
 
-  const start = () => {
+  const start = useCallback(() => {
     achievedRef.current = 0;
     setAchieved(0);
     intervalsRef.current = [];
     setLastInterval(null);
+    setAvgInterval(null);
     setResult(null);
     stateRef.current = "ready";
     setState("ready");
     // slow tempo でも SCR_RESET で中断されないよう、reset 閾値を target*2 + 余裕に設定
     const target = targetIntervalMs();
     setScrResetMs(Math.max(500, Math.round(target * 2.5)));
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setScrResetMs]);
+
+  // count=1 (新しい SCR セッションの最初のスクラッチ) を受けて状態遷移
+  const onChange = useCallback((count: number, _dir: number) => {
+    if (count !== 1) return;
+    // done 中なら自動で次の run を開始 (state は ready に戻る)
+    if (stateRef.current === "done") {
+      start();
+    }
+    // ready 中の最初のスクラッチを 1枚目としてカウント (auto-restart 直後もここに来る)
+    if (stateRef.current === "ready") {
+      stateRef.current = "running";
+      setState("running");
+      achievedRef.current = 1;
+      setAchieved(1);
+    }
+  }, [start]);
+  useEffect(() => {
+    onScratchChange(onChange);
+    return () => offScratchChange(onChange);
+  }, [onScratchChange, offScratchChange, onChange]);
 
   const reset = () => {
     stateRef.current = "idle";
@@ -135,6 +180,7 @@ export default function ConstantMode({
     setAchieved(0);
     intervalsRef.current = [];
     setLastInterval(null);
+    setAvgInterval(null);
     setResult(null);
     setScrResetMs(null);
   };
@@ -149,13 +195,13 @@ export default function ConstantMode({
       </CardHeader>
       <CardContent className="px-3 pb-3 flex flex-col gap-2">
         {/* 音符選択 */}
-        <div className="flex gap-1">
+        <div className="flex gap-0.5">
           {NOTE_DIVS.map(d => (
             <Button
               key={d}
               size="sm"
               variant={noteDiv === d ? "default" : "outline"}
-              className="text-[10px] h-7 px-2 flex-1"
+              className="text-xs h-7 px-0 flex-1 min-w-0"
               disabled={state === "ready" || state === "running"}
               onClick={() => {
                 setNoteDiv(d);
@@ -196,7 +242,7 @@ export default function ConstantMode({
             }}
             onBlur={(e) => {
               const v = parseInt(e.target.value);
-              const resolved = (!isNaN(v) && v >= 1) ? Math.min(9999, v) : 50;
+              const resolved = (!isNaN(v) && v >= 1) ? Math.min(9999, v) : 16;
               setTargetCount(resolved);
               targetCountRef.current = resolved;
               setTargetCountText(String(resolved));
@@ -236,6 +282,12 @@ export default function ConstantMode({
                 <span className="tabular-nums">{lastInterval}ms</span>
               </div>
             )}
+            {avgInterval !== null && (
+              <div className="flex justify-between text-xs">
+                <span className="text-muted-foreground">平均</span>
+                <span className="tabular-nums">{avgInterval}ms</span>
+              </div>
+            )}
             {state === "ready" && (
               <span className="text-xs text-muted-foreground animate-pulse text-center">入力で開始</span>
             )}
@@ -245,10 +297,12 @@ export default function ConstantMode({
         {/* 結果表示 */}
         {state === "done" && result && (
           <div className="flex flex-col gap-1 border-t border-border pt-2">
-            {result.success ? (
+            {result.endReason === "success" ? (
               <div className="text-sm font-bold text-green-400 text-center">CLEAR!</div>
-            ) : (
+            ) : result.endReason === "deviation" ? (
               <div className="text-sm font-bold text-red-400 text-center">FAILED</div>
+            ) : (
+              <div className="text-sm font-bold text-orange-400 text-center">STOPPED</div>
             )}
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">音符</span>

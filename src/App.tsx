@@ -10,6 +10,9 @@ import { Slider } from "@/components/ui/slider";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { Play, ChevronsRight, Settings } from "lucide-react";
 import "./App.css";
 
@@ -78,8 +81,7 @@ function drawTimeline(
   scrCount: number,
   gridMode: GridMode,
   bpm: number,
-  scrLastOriginMs: number,
-  scrLastInputMs: number,
+  scrSessions: ReadonlyArray<{ originMs: number; lastInputMs: number }>,
   laneDefs: LaneDef[],
   timeWindow: number,
   challengeRange: { startMs: number; endMs: number } | null,
@@ -198,26 +200,33 @@ function drawTimeline(
         ctx.fillText(`${Math.round(beatIdx / 4 + 1)}`, 2, y - 2);
       }
     }
-  } else if (gridMode === "scr" && isFinite(scrLastOriginMs)) {
-    const origin = scrLastOriginMs;
+  } else if (gridMode === "scr" && scrSessions.length > 0) {
+    // 各セッションごとに小節線を描画 (スクロールで過去に戻っても当時のグリッドが見える)
     const beatMs = 60000 / bpm;
     const rangeStart = viewNowMs - timeWindow;
-    const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
-    // 最後の入力から 1 秒間は小節線を描画し続ける (入力が途切れた瞬間にプツッと消えないように)
-    const scrGridEnd = isFinite(scrLastInputMs) ? scrLastInputMs + 1000 : viewNowMs;
-    for (let i = firstBeatOffset; ; i++) {
-      const g = origin + i * beatMs;
-      if (g > viewNowMs) break;
-      if (g < origin) continue;
-      if (g > scrGridEnd) continue;
-      const y = Math.round(tToY(g));
-      if (y < HEADER_H || y > BODY_BOTTOM) continue;
-      const isMeasure = i % 4 === 0;
-      ctx.strokeStyle = isMeasure ? "#aaf" : "#446";
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-      if (isMeasure) {
-        ctx.fillStyle = "#99b"; ctx.font = "10px monospace";
-        ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
+    for (const session of scrSessions) {
+      const origin = session.originMs;
+      if (!isFinite(origin)) continue;
+      // 最後の入力から 1 秒間は描画継続
+      const scrGridEnd = session.lastInputMs + 1000;
+      // セッションが view 範囲外なら skip
+      if (scrGridEnd < rangeStart) continue;
+      if (origin > viewNowMs) continue;
+      const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
+      for (let i = firstBeatOffset; ; i++) {
+        const g = origin + i * beatMs;
+        if (g > viewNowMs) break;
+        if (g < origin) continue;
+        if (g > scrGridEnd) break;
+        const y = Math.round(tToY(g));
+        if (y < HEADER_H || y > BODY_BOTTOM) continue;
+        const isMeasure = i % 4 === 0;
+        ctx.strokeStyle = isMeasure ? "#aaf" : "#446";
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        if (isMeasure) {
+          ctx.fillStyle = "#99b"; ctx.font = "10px monospace";
+          ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
+        }
       }
     }
   }
@@ -613,6 +622,9 @@ export default function App() {
     if (!isFinite(saved)) return -Infinity;
     return -(Date.now() - saved);
   })());
+  // SCR セッション履歴: 過去にスクラッチした各 run の origin/lastInput を保持し、
+  // スクロールで過去に戻ったときも当時の小節線が描画されるように使う
+  const scrSessionsRef      = useRef<Array<{ originMs: number; lastInputMs: number }>>([]);
 
   // 棒グラフ用: 直近INTERVAL_HISTORY件の間隔履歴
   const intervalHistoryRef = useRef<IntervalEntry[]>([]);
@@ -662,7 +674,7 @@ export default function App() {
   }, [chartScale, bpm]);
 
   // ---- モードタブ ----
-  type AppMode = "free" | "challenge" | "drill" | "constant";
+  type AppMode = AppConfig["appMode"];
   const [appMode, setAppMode] = useState<AppMode>("free");
 
   // チャレンジモード: 入力種別自動判別（"scr" | "key" | null=未確定）
@@ -729,6 +741,10 @@ export default function App() {
         invoke("set_phoenix_wan_mode", { enabled: config.phoenixWan }).catch(console.error);
         chartScaleRef.current = config.chartScale;
         setChartScale(config.chartScale);
+        scrResetMsBaseRef.current = config.scrResetMs;
+        setScrResetMsBase(config.scrResetMs);
+        scrResetMsRef.current = config.scrResetMs;
+        setAppMode(config.appMode);
         if (config.metronome.on && !audioCtxRef.current) {
           audioCtxRef.current = new AudioContext();
           if (audioCtxRef.current.state === "suspended") audioCtxRef.current.resume();
@@ -807,10 +823,13 @@ export default function App() {
   const keyDownCallbacks = useRef<Set<(laneId: string) => void>>(new Set());
   const scrFirstDirRef = useRef(0);
 
-  // SCR_RESET_MS 動的上書き用 (Constant モードで slow tempo を扱えるよう)
+  // 連皿しきい値 (基本値、ユーザ設定。500/400/300)
+  const [scrResetMsBase, setScrResetMsBase] = useState<number>(SCR_RESET_MS);
+  const scrResetMsBaseRef = useRef<number>(SCR_RESET_MS);
+  // SCR_RESET_MS 動的上書き用 (Constant モードで slow tempo を扱えるよう、target*2.5 等に上書き)
   const scrResetMsRef = useRef<number>(SCR_RESET_MS);
   const setScrResetMs = useCallback((ms: number | null) => {
-    scrResetMsRef.current = ms ?? SCR_RESET_MS;
+    scrResetMsRef.current = ms ?? scrResetMsBaseRef.current;
   }, []);
 
   const onScratchReset = useCallback((cb: (finalCount: number, firstDir: number) => void) => {
@@ -940,6 +959,8 @@ export default function App() {
           saveConfigToFile({ scrOriginWallMs: wallNow });
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
+          // 新しい SCR セッションを履歴に追加
+          scrSessionsRef.current.push({ originMs: nowJs, lastInputMs: nowJs });
           if (challengeStateRef.current !== "running") {
             intervalHistoryRef.current = [{ ms: 0, dir }];
             challengeBarStartIdx.current = 0;
@@ -948,6 +969,9 @@ export default function App() {
             intervalHistoryRef.current = [...intervalHistoryRef.current, { ms: 0, dir }];
           }
         }
+        // 現セッションの lastInputMs を更新
+        const curSession = scrSessionsRef.current.at(-1);
+        if (curSession) curSession.lastInputMs = nowJs;
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
         // 日別カウント
@@ -1220,6 +1244,10 @@ export default function App() {
           ch.spans = ch.spans.filter((s) => (s.end ?? nowMs) > cutoff);
         }
       }
+      // SCR セッション履歴も同じ window 内に保持
+      if (scrSessionsRef.current.length > 0 && scrSessionsRef.current[0].lastInputMs < cutoff) {
+        scrSessionsRef.current = scrSessionsRef.current.filter(s => s.lastInputMs >= cutoff);
+      }
 
       const pb = playbackRef.current;
       let viewNowMs: number;
@@ -1257,7 +1285,7 @@ export default function App() {
           : null;
         drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
           canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
-          scrLastOriginRef.current, scrLastTimeRef.current, orderedLanes,
+          scrSessionsRef.current, orderedLanes,
           greenNumRef.current * 1000 / 600, cRange, activeLane);
       }
       if (chartCtxRef.current && chartCanvasRef.current) {
@@ -1470,7 +1498,10 @@ export default function App() {
             size="sm"
             variant={appMode === m.id ? "default" : "outline"}
             className="text-xs"
-            onClick={() => setAppMode(m.id)}
+            onClick={() => {
+              setAppMode(m.id);
+              saveConfigToFile({ appMode: m.id });
+            }}
           >
             {m.label}
           </Button>
@@ -1659,6 +1690,10 @@ export default function App() {
           <ConstantMode
             onScratchInterval={onScratchInterval}
             offScratchInterval={offScratchInterval}
+            onScratchChange={onScratchChange}
+            offScratchChange={offScratchChange}
+            onScratchReset={onScratchReset}
+            offScratchReset={offScratchReset}
             setScrResetMs={setScrResetMs}
             onComplete={handleConstantComplete}
             bpm={bpm}
@@ -1866,6 +1901,31 @@ export default function App() {
                 />
               </div>
             </div>
+
+            {/* 連皿しきい値 */}
+            <div className="flex items-center justify-between border-t border-border pt-2">
+              <span className="text-xs text-muted-foreground">連皿しきい値</span>
+              <Select
+                value={String(scrResetMsBase)}
+                onValueChange={(v) => {
+                  const ms = parseInt(v);
+                  if (![300, 400, 500].includes(ms)) return;
+                  setScrResetMsBase(ms);
+                  scrResetMsBaseRef.current = ms;
+                  scrResetMsRef.current = ms;
+                  saveConfigToFile({ scrResetMs: ms });
+                }}
+              >
+                <SelectTrigger className="h-7 w-20 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {([500, 400, 300] as const).map(ms => (
+                    <SelectItem key={ms} value={String(ms)} className="text-xs">{ms}ms</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </CardContent>
         </Card>
 
@@ -1875,26 +1935,24 @@ export default function App() {
             <CardTitle className="text-xs text-muted-foreground">Scratch Info</CardTitle>
           </CardHeader>
           <CardContent className="px-3 pb-3 flex flex-col gap-2">
-            <div className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">連続枚数</span>
-              <span className={`text-right text-lg font-bold tabular-nums ${scrInfo.count > 0 ? "text-yellow-300" : "text-muted"}`}>
+              <span className={`text-sm font-bold tabular-nums ${scrInfo.count > 0 ? "text-yellow-300" : "text-muted"}`}>
                 {scrInfo.count > 0 ? scrInfo.count : "—"}
               </span>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">間隔</span>
-              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-white" : "text-zinc-400"}`}>
-                {scrInfo.intervalMs !== null
-                  ? `${scrInfo.intervalMs}ms${scrInfo.noteDivision ? ` (${scrInfo.noteDivision})` : ""}`
-                  : "—"}
+              <span className={`text-xs tabular-nums font-mono ${scrActive ? "text-white" : "text-zinc-400"}`}>
+                <span className="inline-block w-12 text-right">{scrInfo.intervalMs !== null ? `${scrInfo.intervalMs}ms` : "—"}</span>
+                <span className="inline-block w-16 text-right">{scrInfo.noteDivision ? `(${scrInfo.noteDivision})` : ""}</span>
               </span>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">平均間隔</span>
-              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-white" : "text-zinc-400"}`}>
-                {scrInfo.avgIntervalMs !== null
-                  ? `${scrInfo.avgIntervalMs}ms${scrInfo.avgNoteDivision ? ` (${scrInfo.avgNoteDivision})` : ""}`
-                  : "—"}
+              <span className={`text-xs tabular-nums font-mono ${scrActive ? "text-white" : "text-zinc-400"}`}>
+                <span className="inline-block w-12 text-right">{scrInfo.avgIntervalMs !== null ? `${scrInfo.avgIntervalMs}ms` : "—"}</span>
+                <span className="inline-block w-16 text-right">{scrInfo.avgNoteDivision ? `(${scrInfo.avgNoteDivision})` : ""}</span>
               </span>
             </div>
           </CardContent>
