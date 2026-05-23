@@ -153,10 +153,14 @@ function drawTimeline(
         ctx.fillRect(lx + 1, bodyTop, lw - 2, bodyBottom - bodyTop);
         ctx.globalAlpha = 1.0;
       }
-      const startMarkerBottom = Math.min(drawBottom, BODY_BOTTOM);
-      const startMarkerTop    = Math.max(startMarkerBottom - TICK_H, HEADER_H);
-      if (startMarkerBottom > startMarkerTop) {
-        ctx.fillStyle = color; ctx.fillRect(lx, startMarkerTop, lw, startMarkerBottom - startMarkerTop);
+      // start marker (note の下端): yBottom が BODY_BOTTOM を超えたら描画しない
+      // (画面下端で marker が貼り付いて見える残像を防ぐ)
+      if (yBottom <= BODY_BOTTOM) {
+        const startMarkerBottom = yBottom;
+        const startMarkerTop    = Math.max(startMarkerBottom - TICK_H, HEADER_H);
+        if (startMarkerBottom > startMarkerTop) {
+          ctx.fillStyle = color; ctx.fillRect(lx, startMarkerTop, lw, startMarkerBottom - startMarkerTop);
+        }
       }
       if (span.end !== null) {
         const endMarkerTop    = Math.max(drawTop, HEADER_H);
