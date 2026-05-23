@@ -41,10 +41,11 @@ pub fn default_config() -> Value {
 
 pub fn default_records() -> Value {
     json!({
-        "version": 1,
+        "version": 2,
         "challengeRecords": [],
         "drillRecords": [],
         "rapidPressRecords": [],
+        "constantRecords": [],
         "dailyCounts": {}
     })
 }
@@ -105,6 +106,16 @@ pub fn migrate_records(mut value: Value) -> Value {
                 if !val_obj.contains_key(key) {
                     val_obj.insert(key.clone(), def_val.clone());
                 }
+            }
+        }
+    }
+
+    // v1 -> v2: add constantRecords
+    if version < 2 {
+        value["version"] = json!(2);
+        if let Some(val_obj) = value.as_object_mut() {
+            if !val_obj.contains_key("constantRecords") {
+                val_obj.insert("constantRecords".to_string(), json!([]));
             }
         }
     }

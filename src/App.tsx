@@ -16,7 +16,7 @@ import "./App.css";
 import type {
   InputEvent, Binding, KeyConfig, Channel, LaneDef,
   GridMode, ScrInfo, IntervalEntry, ChallengeState,
-  AppConfig, AppRecords, ChallengeRecord, DrillResult, RapidPressResult,
+  AppConfig, AppRecords, ChallengeRecord, DrillResult, RapidPressResult, ConstantResult,
 } from "./types";
 import {
   CANVAS_H, HEADER_H, AXIS_TIMEOUT, SCR_RESET_MS, SPAN_RETAIN,
@@ -31,6 +31,7 @@ import {
   exportRecords, migrateFromLocalStorage, clearLocalStorage,
 } from "./lib/storage";
 import DrillMode from "./components/DrillMode";
+import ConstantMode from "./components/ConstantMode";
 import RecordsView from "./components/RecordsView";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
@@ -202,7 +203,8 @@ function drawTimeline(
     const beatMs = 60000 / bpm;
     const rangeStart = viewNowMs - timeWindow;
     const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
-    const scrGridEnd = isFinite(scrLastInputMs) ? scrLastInputMs : viewNowMs;
+    // 最後の入力から 1 秒間は小節線を描画し続ける (入力が途切れた瞬間にプツッと消えないように)
+    const scrGridEnd = isFinite(scrLastInputMs) ? scrLastInputMs + 1000 : viewNowMs;
     for (let i = firstBeatOffset; ; i++) {
       const g = origin + i * beatMs;
       if (g > viewNowMs) break;
@@ -660,7 +662,7 @@ export default function App() {
   }, [chartScale, bpm]);
 
   // ---- モードタブ ----
-  type AppMode = "free" | "challenge" | "drill";
+  type AppMode = "free" | "challenge" | "drill" | "constant";
   const [appMode, setAppMode] = useState<AppMode>("free");
 
   // チャレンジモード: 入力種別自動判別（"scr" | "key" | null=未確定）
@@ -758,7 +760,7 @@ export default function App() {
   // 記録を保存するヘルパー
   const saveRecords = useCallback((updater: (prev: AppRecords) => AppRecords) => {
     setAppRecords(prev => {
-      const base = prev ?? { version: 1, challengeRecords: [], drillRecords: [], rapidPressRecords: [], dailyCounts: {} };
+      const base = prev ?? { version: 2, challengeRecords: [], drillRecords: [], rapidPressRecords: [], constantRecords: [], dailyCounts: {} };
       const updated = updater(base);
       appRecordsRef.current = updated;
       writeRecords(updated).catch(console.error);
@@ -801,8 +803,15 @@ export default function App() {
   // ---- ドリルモード・連打モード用コールバックシステム ----
   const scratchResetCallbacks = useRef<Set<(finalCount: number, firstDir: number) => void>>(new Set());
   const scratchChangeCallbacks = useRef<Set<(count: number, dir: number) => void>>(new Set());
+  const scratchIntervalCallbacks = useRef<Set<(intervalMs: number, dir: number) => void>>(new Set());
   const keyDownCallbacks = useRef<Set<(laneId: string) => void>>(new Set());
   const scrFirstDirRef = useRef(0);
+
+  // SCR_RESET_MS 動的上書き用 (Constant モードで slow tempo を扱えるよう)
+  const scrResetMsRef = useRef<number>(SCR_RESET_MS);
+  const setScrResetMs = useCallback((ms: number | null) => {
+    scrResetMsRef.current = ms ?? SCR_RESET_MS;
+  }, []);
 
   const onScratchReset = useCallback((cb: (finalCount: number, firstDir: number) => void) => {
     scratchResetCallbacks.current.add(cb);
@@ -815,6 +824,12 @@ export default function App() {
   }, []);
   const offScratchChange = useCallback((cb: (count: number, dir: number) => void) => {
     scratchChangeCallbacks.current.delete(cb);
+  }, []);
+  const onScratchInterval = useCallback((cb: (intervalMs: number, dir: number) => void) => {
+    scratchIntervalCallbacks.current.add(cb);
+  }, []);
+  const offScratchInterval = useCallback((cb: (intervalMs: number, dir: number) => void) => {
+    scratchIntervalCallbacks.current.delete(cb);
   }, []);
 
   // ---- 記録完了ハンドラ ----
@@ -836,6 +851,13 @@ export default function App() {
     saveRecords(prev => ({
       ...prev,
       rapidPressRecords: [...prev.rapidPressRecords, result],
+    }));
+  }, [saveRecords]);
+
+  const handleConstantComplete = useCallback((result: ConstantResult) => {
+    saveRecords(prev => ({
+      ...prev,
+      constantRecords: [...prev.constantRecords, result],
     }));
   }, [saveRecords]);
 
@@ -979,6 +1001,9 @@ export default function App() {
           scrIntervalHistRef.current.push(intervalMs);
           const sum = scrIntervalHistRef.current.reduce((s, v) => s + v, 0);
           avgIntervalMs = Math.round(sum / scrIntervalHistRef.current.length);
+
+          // Constant モード等向け interval コールバック通知
+          for (const cb of scratchIntervalCallbacks.current) cb(intervalMs, dir);
 
           const elapsedMs = nowJs - scrOriginRef.current;
           if (elapsedMs > 0 && scrCountRef.current >= 2) {
@@ -1174,7 +1199,7 @@ export default function App() {
         }
       });
 
-      if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > SCR_RESET_MS) {
+      if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > scrResetMsRef.current) {
         const finalCount = scrCountRef.current;
         const firstDir = scrFirstDirRef.current;
         scrCountRef.current = 0;
@@ -1438,6 +1463,7 @@ export default function App() {
           { id: "free" as AppMode, label: "Free" },
           { id: "challenge" as AppMode, label: "Challenge" },
           { id: "drill" as AppMode, label: "Drill" },
+          { id: "constant" as AppMode, label: "Constant" },
         ]).map(m => (
           <Button
             key={m.id}
@@ -1625,6 +1651,17 @@ export default function App() {
             onScratchChange={onScratchChange}
             offScratchChange={offScratchChange}
             onComplete={handleDrillComplete}
+          />
+        )}
+
+        {/* Constantモード */}
+        {appMode === "constant" && (
+          <ConstantMode
+            onScratchInterval={onScratchInterval}
+            offScratchInterval={offScratchInterval}
+            setScrResetMs={setScrResetMs}
+            onComplete={handleConstantComplete}
+            bpm={bpm}
           />
         )}
 

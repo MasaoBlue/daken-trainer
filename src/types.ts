@@ -86,6 +86,23 @@ export interface RapidPressResult {
   keyLabel: string;
 }
 
+// ---- Constant モード型 ----------------------------------------------------
+
+export type ConstantState = "idle" | "ready" | "running" | "done";
+
+export interface ConstantResult {
+  date: string;
+  bpm: number;
+  noteDivision: 4 | 8 | 16 | 32;
+  targetIntervalMs: number;
+  targetCount: number | null;     // null = 無限モード
+  achievedCount: number;          // 成功した枚数
+  success: boolean;               // targetCount を達成したか
+  failedIntervalMs: number | null; // 失敗した interval (success なら null)
+  failedDeviationMs: number | null; // target からのズレ (符号: + 遅すぎ / - 速すぎ)
+  avgIntervalMs: number | null;   // 成功 interval の平均
+}
+
 // ---- 設定型 ----------------------------------------------------------------
 
 export interface AppConfig {
@@ -127,5 +144,6 @@ export interface AppRecords {
   challengeRecords: ChallengeRecord[];
   drillRecords: DrillResult[];
   rapidPressRecords: RapidPressResult[];
+  constantRecords: ConstantResult[];
   dailyCounts: Record<string, DailyCount>;
 }
