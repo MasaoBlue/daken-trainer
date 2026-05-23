@@ -124,6 +124,7 @@ export interface AppConfig {
   chartScale: "log" | "linear";
   scrResetMs: number; // 連皿しきい値 (ms)。500/400/300 から選択
   appMode: "free" | "challenge" | "drill" | "constant";
+  constantThresholdRatio: number; // Constant モードの許容比率 (0.10〜0.50、0.10刻み)
 }
 
 // ---- 記録型 ----------------------------------------------------------------

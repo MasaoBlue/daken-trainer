@@ -3,6 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import type { ConstantState, ConstantResult } from "../types";
 
 interface ConstantModeProps {
@@ -14,12 +17,15 @@ interface ConstantModeProps {
   offScratchReset: (cb: (finalCount: number, firstDir: number) => void) => void;
   setScrResetMs: (ms: number | null) => void;
   onComplete: (result: ConstantResult) => void;
+  onNoteDivChange?: (div: 8 | 12 | 16 | 24 | 32) => void;
+  onThresholdRatioChange?: (ratio: number) => void;
+  initialThresholdRatio?: number;
   bpm: number;
 }
 
 const NOTE_DIVS = [8, 12, 16, 24, 32] as const;
 type NoteDiv = (typeof NOTE_DIVS)[number];
-const THRESHOLD_RATIO = 0.30; // ±30% を許容
+const THRESHOLD_RATIOS = [0.10, 0.20, 0.30, 0.40, 0.50] as const;
 
 function noteDivLabel(d: NoteDiv): string {
   return `${d}分`;
@@ -34,6 +40,9 @@ export default function ConstantMode({
   offScratchReset,
   setScrResetMs,
   onComplete,
+  onNoteDivChange,
+  onThresholdRatioChange,
+  initialThresholdRatio = 0.30,
   bpm,
 }: ConstantModeProps) {
   const [state, setState] = useState<ConstantState>("idle");
@@ -41,6 +50,9 @@ export default function ConstantMode({
 
   const [noteDiv, setNoteDiv] = useState<NoteDiv>(16);
   const noteDivRef = useRef<NoteDiv>(16);
+
+  const [thresholdRatio, setThresholdRatio] = useState<number>(initialThresholdRatio);
+  const thresholdRatioRef = useRef<number>(initialThresholdRatio);
 
   const [useTarget, setUseTarget] = useState(false);
   const useTargetRef = useRef(false);
@@ -51,6 +63,16 @@ export default function ConstantMode({
   // 現在 BPM を ref で持ち続ける
   const bpmRef = useRef(bpm);
   useEffect(() => { bpmRef.current = bpm; }, [bpm]);
+
+  // マウント時 + noteDiv 変更時に親へ通知 (App.tsx でグラフ Y軸 range の計算に利用)
+  useEffect(() => {
+    onNoteDivChange?.(noteDiv);
+  }, [noteDiv, onNoteDivChange]);
+
+  // マウント時 + ratio 変更時に親へ通知
+  useEffect(() => {
+    onThresholdRatioChange?.(thresholdRatio);
+  }, [thresholdRatio, onThresholdRatioChange]);
 
   // 達成カウント・平均
   const achievedRef = useRef(0);
@@ -104,7 +126,7 @@ export default function ConstantMode({
 
     setLastInterval(intervalMs);
 
-    if (ratio > THRESHOLD_RATIO) {
+    if (ratio > thresholdRatioRef.current) {
       // 失敗 (ズレ過大)
       stop("deviation", intervalMs, Math.round(deviation));
       return;
@@ -211,6 +233,30 @@ export default function ConstantMode({
               {noteDivLabel(d)}
             </Button>
           ))}
+        </div>
+
+        {/* 許容 */}
+        <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
+          <Label className="text-xs">許容</Label>
+          <Select
+            value={String(thresholdRatio)}
+            disabled={state === "ready" || state === "running"}
+            onValueChange={(v) => {
+              const r = parseFloat(v);
+              if (isNaN(r)) return;
+              setThresholdRatio(r);
+              thresholdRatioRef.current = r;
+            }}
+          >
+            <SelectTrigger className="h-7 w-20 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {THRESHOLD_RATIOS.map(r => (
+                <SelectItem key={r} value={String(r)} className="text-xs">±{Math.round(r * 100)}%</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* 目標枚数 */}

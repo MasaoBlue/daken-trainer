@@ -2,6 +2,9 @@ import type { LaneDef } from "./types";
 
 // ---- Canvas定数 -----------------------------------------------------------
 
+// Constant モードで許容する target からのズレ比率 (例: 0.30 = ±30%)
+export const CONSTANT_THRESHOLD_RATIO = 0.30;
+
 export const CANVAS_H = 600;
 export const HEADER_H = 40;
 export const AXIS_TIMEOUT = 150;

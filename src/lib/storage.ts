@@ -81,6 +81,7 @@ export function migrateFromLocalStorage(): AppConfig | null {
     chartScale: "linear",
     scrResetMs: 500,
     appMode: "free",
+    constantThresholdRatio: 0.30,
   };
 
   return config;

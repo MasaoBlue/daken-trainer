@@ -21,7 +21,7 @@ pub fn write_json(path: &PathBuf, value: &Value) -> Result<(), String> {
 
 pub fn default_config() -> Value {
     json!({
-        "version": 5,
+        "version": 6,
         "keyConfig": {},
         "bpm": 150,
         "greenNum": 1000,
@@ -37,7 +37,8 @@ pub fn default_config() -> Value {
         "phoenixWan": false,
         "chartScale": "linear",
         "scrResetMs": 500,
-        "appMode": "free"
+        "appMode": "free",
+        "constantThresholdRatio": 0.30
     })
 }
 
@@ -111,7 +112,17 @@ pub fn migrate_config(mut value: Value) -> Value {
         }
     }
 
-    // Future migrations: v5 -> v6, etc.
+    // v5 -> v6: add constantThresholdRatio
+    if version < 6 {
+        value["version"] = json!(6);
+        if let Some(val_obj) = value.as_object_mut() {
+            if !val_obj.contains_key("constantThresholdRatio") {
+                val_obj.insert("constantThresholdRatio".to_string(), json!(0.30));
+            }
+        }
+    }
+
+    // Future migrations: v6 -> v7, etc.
 
     value
 }

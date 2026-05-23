@@ -265,12 +265,46 @@ function drawTimeline(
 
 // ---- 棒グラフ Canvas 描画 ---------------------------------------------------
 
+// Constant モードのみ target+許容ライン情報を返す
+function computeConstantInfo(
+  appMode: "free" | "challenge" | "drill" | "constant",
+  bpm: number,
+  constantNoteDiv: 8 | 12 | 16 | 24 | 32,
+  thresholdRatio: number,
+): { targetMs: number; lowerMs: number; upperMs: number } | null {
+  if (appMode !== "constant" || bpm <= 0) return null;
+  const targetMs = 60000 / bpm / (constantNoteDiv / 4);
+  return {
+    targetMs,
+    lowerMs: targetMs * (1 - thresholdRatio),
+    upperMs: targetMs * (1 + thresholdRatio),
+  };
+}
+
+// 現在の linear モード Y軸 range を決定する
+// - Constant モード時: target ± 50ms に zoom
+// - それ以外: 1ms 〜 (scrResetMs - 1)
+function computeLinRange(
+  constantInfo: { targetMs: number; lowerMs: number; upperMs: number } | null,
+  scrResetMs: number,
+): { minMs: number; maxMs: number } {
+  if (constantInfo !== null) {
+    return {
+      minMs: Math.max(1, Math.round(constantInfo.targetMs - 50)),
+      maxMs: Math.round(constantInfo.targetMs + 50),
+    };
+  }
+  return { minMs: 1, maxMs: Math.max(2, scrResetMs - 1) };
+}
+
 // 横スクロール時もY軸ラベルが見えるよう、スクロール領域の外に固定overlayで描画する
 function drawYAxisLabels(
   ctx: CanvasRenderingContext2D,
   h: number,
   bpm: number,
   scaleMode: "log" | "linear",
+  linRange: { minMs: number; maxMs: number },
+  constantInfo: { targetMs: number; lowerMs: number; upperMs: number } | null,
 ) {
   const w = CHART_PAD_L;
   // 背景: バーや線が overlay 領域の裏に来ても透けないようマスク
@@ -295,27 +329,39 @@ function drawYAxisLabels(
   };
 
   if (scaleMode === "linear") {
-    const linMinMs = 1;
-    const linMaxMs = SCR_RESET_MS - 1;
+    const linMinMs = linRange.minMs;
+    const linMaxMs = linRange.maxMs;
     const msToY = (ms: number) => {
       const clamped = Math.max(linMinMs, Math.min(linMaxMs, ms));
       const ratio = (clamped - linMinMs) / (linMaxMs - linMinMs);
       return PAD_T + Math.round(ratio * plotH);
     };
-    const TICK_STEP_MS = 100;
-    const TICK_COLOR = "#888";
     ctx.font = "bold 11px monospace";
     ctx.textAlign = "right";
-    for (let ms = TICK_STEP_MS; ms < linMaxMs; ms += TICK_STEP_MS) {
+    const drawLabel = (ms: number, color: string) => {
       const y = msToY(ms);
-      if (y < PAD_T || y > PAD_T + plotH) continue;
+      if (y < PAD_T || y > PAD_T + plotH) return;
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 4;
       ctx.lineJoin = "round";
-      ctx.strokeText(`${ms}`, plotX - 6, y + 4);
-      ctx.fillStyle = TICK_COLOR;
-      ctx.fillText(`${ms}`, plotX - 6, y + 4);
-      drawYTick(y, "#666");
+      ctx.strokeText(`${Math.round(ms)}`, plotX - 6, y + 4);
+      ctx.fillStyle = color;
+      ctx.fillText(`${Math.round(ms)}`, plotX - 6, y + 4);
+      drawYTick(y, color);
+    };
+    if (constantInfo) {
+      // Constant モード: 上下限 (オレンジ) と目標 (黄) のみ
+      drawLabel(constantInfo.lowerMs, "#f64");
+      drawLabel(constantInfo.upperMs, "#f64");
+      drawLabel(constantInfo.targetMs, "#ff3");
+    } else {
+      // 通常 linear: 適応的 tick
+      const TICK_STEP_MS = pickTickStep(linMaxMs - linMinMs);
+      const TICK_COLOR = "#888";
+      const firstTick = Math.ceil(linMinMs / TICK_STEP_MS) * TICK_STEP_MS;
+      for (let ms = firstTick; ms <= linMaxMs; ms += TICK_STEP_MS) {
+        drawLabel(ms, TICK_COLOR);
+      }
     }
     // 単位 (ms): 一回り大きく
     ctx.font = "bold 11px monospace";
@@ -362,6 +408,14 @@ function drawYAxisLabels(
   }
 }
 
+// linear モードで使う Y軸 tick の刻み幅をレンジから決定 (5〜8 本になるよう)
+function pickTickStep(rangeMs: number): number {
+  if (rangeMs <= 50) return 10;
+  if (rangeMs <= 120) return 20;
+  if (rangeMs <= 250) return 50;
+  return 100;
+}
+
 function drawBarChart(
   ctx: CanvasRenderingContext2D,
   intervals: IntervalEntry[],
@@ -370,6 +424,8 @@ function drawBarChart(
   h: number,
   challengeBarRange: { startIdx: number; endIdx: number } | null,
   scaleMode: "log" | "linear",
+  linRange: { minMs: number; maxMs: number },
+  constantInfo: { targetMs: number; lowerMs: number; upperMs: number } | null,
 ) {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#111";
@@ -383,13 +439,13 @@ function drawBarChart(
   const noteRefMs = ALL_DIVS.map(d => ({ d, ms: beatMs > 0 ? beatMs / (d / 4) : 0 }));
   // 上=速い(小さいms=32分)、下=遅い(大きいms=4分)
   // log: BPMから動的に min/max を決定 (32分*0.5 〜 4分*1.5)
-  // linear: SCR_RESET_MS を上限とした固定スケール (1ms 〜 SCR_RESET_MS-1)
+  // linear: 呼び出し側から指定された linRange を使用
   const lastMs = noteRefMs.at(-1)?.ms ?? 0;
   const logMinMs = lastMs > 0 ? lastMs * 0.5 : 10;
   const logMaxMs = noteRefMs[0]?.ms > 0 ? noteRefMs[0].ms * 1.5
     : (intervals.length > 0 ? Math.max(...intervals.map(e => e.ms)) * 1.5 : 1000);
-  const linMinMs = 1;
-  const linMaxMs = SCR_RESET_MS - 1;
+  const linMinMs = linRange.minMs;
+  const linMaxMs = linRange.maxMs;
 
   // レイアウト
   // 上: PAD_T, 下: PAD_B(X軸ラベル), 左: CHART_PAD_L(Y軸ラベル)
@@ -415,20 +471,24 @@ function drawBarChart(
 
   // Y軸リファレンスライン (ラベルは drawYAxisLabels に分離)
   if (scaleMode === "linear") {
-    // 100ms 間隔の時間目盛り (lineのみ)
-    const TICK_STEP_MS = 100;
-    const TICK_COLOR = "#888";
-    for (let ms = TICK_STEP_MS; ms < linMaxMs; ms += TICK_STEP_MS) {
-      const y = msToY(ms);
-      if (y < PAD_T || y > PAD_T + plotH) continue;
-      ctx.strokeStyle = TICK_COLOR;
-      ctx.globalAlpha = 0.5;
-      ctx.setLineDash([4, 3]);
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
-      ctx.globalAlpha = 1.0;
-      ctx.setLineDash([]);
+    if (constantInfo === null) {
+      // 通常 linear: tick はレンジに応じて適応的に
+      const TICK_STEP_MS = pickTickStep(linMaxMs - linMinMs);
+      const TICK_COLOR = "#888";
+      const firstTick = Math.ceil(linMinMs / TICK_STEP_MS) * TICK_STEP_MS;
+      for (let ms = firstTick; ms <= linMaxMs; ms += TICK_STEP_MS) {
+        const y = msToY(ms);
+        if (y < PAD_T || y > PAD_T + plotH) continue;
+        ctx.strokeStyle = TICK_COLOR;
+        ctx.globalAlpha = 0.5;
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
+        ctx.globalAlpha = 1.0;
+        ctx.setLineDash([]);
+      }
     }
+    // Constant モード時の通常 tick は省略 (上下限+目標の 3 本のみ描画)
   } else {
     // log: 音符区分リファレンスライン (lineのみ)
     for (const { d, ms } of noteRefMs) {
@@ -445,6 +505,26 @@ function drawBarChart(
       ctx.globalAlpha = 1.0;
       ctx.setLineDash([]);
     }
+  }
+
+  // Constant モード: 上限 / 目標 / 下限 の 3 本
+  if (constantInfo) {
+    const drawLine = (ms: number, color: string, dash: number[]) => {
+      const y = msToY(ms);
+      if (y < PAD_T || y > PAD_T + plotH) return;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.8;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
+      ctx.globalAlpha = 1.0;
+      ctx.setLineDash([]);
+    };
+    // 上下限: オレンジ点線
+    drawLine(constantInfo.lowerMs, "#f64", [6, 4]);
+    drawLine(constantInfo.upperMs, "#f64", [6, 4]);
+    // 目標: 黄色実線 (一目で目立つように)
+    drawLine(constantInfo.targetMs, "#ff3", []);
   }
 
   if (count === 0) return;
@@ -672,14 +752,18 @@ export default function App() {
   const [chartScale, setChartScale] = useState<"log" | "linear">("linear");
   const chartScaleRef = useRef<"log" | "linear">("linear");
 
-  // scale / bpm が変わったら Y軸ラベル overlay を再描画
-  useEffect(() => {
-    if (axisCtxRef.current) drawYAxisLabels(axisCtxRef.current, CHART_H, bpm, chartScale);
-  }, [chartScale, bpm]);
-
   // ---- モードタブ ----
   type AppMode = AppConfig["appMode"];
   const [appMode, setAppMode] = useState<AppMode>("free");
+  const appModeRef = useRef<AppMode>("free");
+  useEffect(() => { appModeRef.current = appMode; }, [appMode]);
+
+  // Constant モードの選択中音符 (Y軸 range 計算用、ConstantMode からコールバックで受け取る)
+  const constantNoteDivRef = useRef<8 | 12 | 16 | 24 | 32>(16);
+
+  // Constant モードの許容比率 (0.10〜0.50)
+  const [constantThresholdRatio, setConstantThresholdRatio] = useState<number>(0.30);
+  const constantThresholdRatioRef = useRef<number>(0.30);
 
   // チャレンジモード: 入力種別自動判別（"scr" | "key" | null=未確定）
   type ChallengeInputType = "scr" | "key" | null;
@@ -749,6 +833,8 @@ export default function App() {
         setScrResetMsBase(config.scrResetMs);
         scrResetMsRef.current = config.scrResetMs;
         setAppMode(config.appMode);
+        setConstantThresholdRatio(config.constantThresholdRatio);
+        constantThresholdRatioRef.current = config.constantThresholdRatio;
         if (config.metronome.on && !audioCtxRef.current) {
           audioCtxRef.current = new AudioContext();
           if (audioCtxRef.current.state === "suspended") audioCtxRef.current.resume();
@@ -835,6 +921,15 @@ export default function App() {
   const setScrResetMs = useCallback((ms: number | null) => {
     scrResetMsRef.current = ms ?? scrResetMsBaseRef.current;
   }, []);
+
+  // scale / bpm / appMode / しきい値 が変わったら Y軸ラベル overlay を再描画
+  useEffect(() => {
+    if (axisCtxRef.current) {
+      const ci = computeConstantInfo(appMode, bpm, constantNoteDivRef.current, constantThresholdRatio);
+      const linRange = computeLinRange(ci, scrResetMsBase);
+      drawYAxisLabels(axisCtxRef.current, CHART_H, bpm, chartScale, linRange, ci);
+    }
+  }, [chartScale, bpm, appMode, scrResetMsBase, constantThresholdRatio]);
 
   const onScratchReset = useCallback((cb: (finalCount: number, firstDir: number) => void) => {
     scratchResetCallbacks.current.add(cb);
@@ -1127,7 +1222,11 @@ export default function App() {
     if (chartCanvasRef.current) chartCtxRef.current = chartCanvasRef.current.getContext("2d");
     if (axisCanvasRef.current) {
       axisCtxRef.current = axisCanvasRef.current.getContext("2d");
-      if (axisCtxRef.current) drawYAxisLabels(axisCtxRef.current, CHART_H, bpmRef.current, chartScaleRef.current);
+      if (axisCtxRef.current) {
+        const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, constantThresholdRatioRef.current);
+        const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
+        drawYAxisLabels(axisCtxRef.current, CHART_H, bpmRef.current, chartScaleRef.current, linRange, ci);
+      }
     }
     if (metroOnRef.current) {
       const ac = new AudioContext();
@@ -1151,7 +1250,9 @@ export default function App() {
               : cs === "done"
               ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
               : null;
-            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr, chartScaleRef.current);
+            const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, constantThresholdRatioRef.current);
+            const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
+            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr, chartScaleRef.current, linRange, ci);
           }
         }
       });
@@ -1309,7 +1410,9 @@ export default function App() {
             chartContainerRef.current.scrollLeft = chartContainerRef.current.scrollWidth;
           }
         }
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange, chartScaleRef.current);
+        const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, constantThresholdRatioRef.current);
+        const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange, chartScaleRef.current, linRange, ci);
       }
       // チャレンジモード: タイマー更新
       if (challengeStateRef.current === "running") {
@@ -1700,6 +1803,26 @@ export default function App() {
             offScratchReset={offScratchReset}
             setScrResetMs={setScrResetMs}
             onComplete={handleConstantComplete}
+            onNoteDivChange={(d) => {
+              constantNoteDivRef.current = d;
+              if (axisCtxRef.current) {
+                const ci = computeConstantInfo(appModeRef.current, bpmRef.current, d, constantThresholdRatioRef.current);
+                const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
+                drawYAxisLabels(axisCtxRef.current, CHART_H, bpmRef.current, chartScaleRef.current, linRange, ci);
+              }
+            }}
+            initialThresholdRatio={constantThresholdRatio}
+            onThresholdRatioChange={(r) => {
+              constantThresholdRatioRef.current = r;
+              setConstantThresholdRatio(r);
+              saveConfigToFile({ constantThresholdRatio: r });
+              // overlay (上下限ライン位置が変わる) を再描画
+              if (axisCtxRef.current) {
+                const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, r);
+                const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
+                drawYAxisLabels(axisCtxRef.current, CHART_H, bpmRef.current, chartScaleRef.current, linRange, ci);
+              }
+            }}
             bpm={bpm}
           />
         )}
