@@ -101,6 +101,7 @@ export interface AppConfig {
   clapOn: boolean;
   scrOriginWallMs: number | null;
   phoenixWan: boolean;
+  chartScale: "log" | "linear";
 }
 
 // ---- 記録型 ----------------------------------------------------------------

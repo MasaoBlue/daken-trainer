@@ -257,6 +257,7 @@ function drawBarChart(
   w: number,
   h: number,
   challengeBarRange: { startIdx: number; endIdx: number } | null,
+  scaleMode: "log" | "linear",
 ) {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#111";
@@ -269,13 +270,14 @@ function drawBarChart(
   const beatMs = bpm > 0 ? 60000 / bpm : 0;
   const noteRefMs = ALL_DIVS.map(d => ({ d, ms: beatMs > 0 ? beatMs / (d / 4) : 0 }));
   // 上=速い(小さいms=32分)、下=遅い(大きいms=4分)
-  // ALL_DIVS=[4,5,...,32] → noteRefMs[0]=d4(大きいms遅い), noteRefMs.at(-1)=d32(小さいms速い)
-  // minMs=上端=速い=小さいms=32分のms*0.5
-  // maxMs=下端=遅い=大きいms=4分のms*1.5
+  // log: BPMから動的に min/max を決定 (32分*0.5 〜 4分*1.5)
+  // linear: SCR_RESET_MS を上限とした固定スケール (1ms 〜 SCR_RESET_MS-1)
   const lastMs = noteRefMs.at(-1)?.ms ?? 0;
-  const minMs = lastMs > 0 ? lastMs * 0.5 : 10;
-  const maxMs = noteRefMs[0]?.ms > 0 ? noteRefMs[0].ms * 1.5
+  const logMinMs = lastMs > 0 ? lastMs * 0.5 : 10;
+  const logMaxMs = noteRefMs[0]?.ms > 0 ? noteRefMs[0].ms * 1.5
     : (intervals.length > 0 ? Math.max(...intervals.map(e => e.ms)) * 1.5 : 1000);
+  const linMinMs = 1;
+  const linMaxMs = SCR_RESET_MS - 1;
 
   // レイアウト
   // 上: PAD_T, 下: PAD_B(X軸ラベル), 左: CHART_PAD_L(Y軸ラベル)
@@ -284,65 +286,117 @@ function drawBarChart(
   const plotX = CHART_PAD_L;      // バー描画開始X
   const plotH = h - PAD_T - PAD_B; // バー描画高さ
 
-  // 対数スケール: 上=速い(小さいms=4分)、下=遅い(大きいms=32分)
+  // モードに応じた msToY: 上=速い(小さいms)、下=遅い(大きいms)
   const msToY = (ms: number) => {
-    const clamped = Math.max(minMs, Math.min(maxMs, ms));
-    const ratio = (Math.log(clamped) - Math.log(minMs)) / (Math.log(maxMs) - Math.log(minMs));
-    return PAD_T + Math.round(ratio * plotH); // ratioが大きい(遅い)ほど下
+    if (scaleMode === "linear") {
+      const clamped = Math.max(linMinMs, Math.min(linMaxMs, ms));
+      const ratio = (clamped - linMinMs) / (linMaxMs - linMinMs);
+      return PAD_T + Math.round(ratio * plotH);
+    }
+    const clamped = Math.max(logMinMs, Math.min(logMaxMs, ms));
+    const ratio = (Math.log(clamped) - Math.log(logMinMs)) / (Math.log(logMaxMs) - Math.log(logMinMs));
+    return PAD_T + Math.round(ratio * plotH);
   };
 
   const count = intervals.length;
   const barW = CHART_BAR_W;
 
-  // Y軸リファレンスライン（ラベル付きのみ描画）
-  for (const { d, ms } of noteRefMs) {
-    if (ms <= 0) continue;
-    const isLabeled = LABELED_DIVS.has(d);
-    if (!isLabeled) continue;
-    const y = msToY(ms);
-    if (y < PAD_T || y > PAD_T + plotH) continue;
-    const color = NOTE_COLOR(d);
-    // ライン（バー描画エリアのみ）
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.75;
-    ctx.setLineDash([4, 3]);
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
-    ctx.globalAlpha = 1.0;
-    ctx.setLineDash([]);
-    // ラベル（左側）- アウトライン付きで視認性向上
-    ctx.font = "bold 11px monospace";
+  // log モードのラベル色を明るくするユーティリティ (線色は note color のまま)
+  const brighten = (rgbStr: string, add: number) => {
+    const nums = rgbStr.match(/\d+/g)?.map(Number) ?? [128, 128, 128];
+    return `rgb(${Math.min(255, nums[0] + add)},${Math.min(255, nums[1] + add)},${Math.min(255, nums[2] + add)})`;
+  };
+
+  // Y軸リファレンスライン
+  if (scaleMode === "linear") {
+    // 100ms 間隔の時間目盛り
+    const TICK_STEP_MS = 100;
+    const TICK_COLOR = "#888";
+    for (let ms = TICK_STEP_MS; ms < linMaxMs; ms += TICK_STEP_MS) {
+      const y = msToY(ms);
+      if (y < PAD_T || y > PAD_T + plotH) continue;
+      // ライン
+      ctx.strokeStyle = TICK_COLOR;
+      ctx.globalAlpha = 0.5;
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
+      ctx.globalAlpha = 1.0;
+      ctx.setLineDash([]);
+      // ラベル
+      ctx.font = "bold 11px monospace";
+      ctx.textAlign = "right";
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeText(`${ms}`, plotX - 6, y + 4);
+      ctx.fillStyle = TICK_COLOR;
+      ctx.fillText(`${ms}`, plotX - 6, y + 4);
+      ctx.textAlign = "left";
+      ctx.lineJoin = "miter";
+    }
+    // 縦軸の単位表示 (ms): y軸上端付近に小さく表示
+    ctx.font = "9px monospace";
     ctx.textAlign = "right";
     ctx.strokeStyle = "#000";
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 3;
     ctx.lineJoin = "round";
-    ctx.strokeText(`${d}`, plotX - 6, y + 4);
-    ctx.fillStyle = color;
-    ctx.fillText(`${d}`, plotX - 6, y + 4);
+    ctx.strokeText("ms", plotX - 6, PAD_T + 8);
+    ctx.fillStyle = "#aaa";
+    ctx.fillText("ms", plotX - 6, PAD_T + 8);
     ctx.textAlign = "left";
     ctx.lineJoin = "miter";
+  } else {
+    // log: 音符区分リファレンスライン（ラベル付きのみ描画）
+    for (const { d, ms } of noteRefMs) {
+      if (ms <= 0) continue;
+      const isLabeled = LABELED_DIVS.has(d);
+      if (!isLabeled) continue;
+      const y = msToY(ms);
+      if (y < PAD_T || y > PAD_T + plotH) continue;
+      const lineColor = NOTE_COLOR(d);
+      const labelColor = brighten(lineColor, 80); // ラベルだけ明るく
+      // ライン（バー描画エリアのみ） - 色はそのまま
+      ctx.strokeStyle = lineColor;
+      ctx.globalAlpha = 0.75;
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(w, y); ctx.stroke();
+      ctx.globalAlpha = 1.0;
+      ctx.setLineDash([]);
+      // ラベル（左側）- アウトライン付きで視認性向上 + 明るい色
+      ctx.font = "bold 11px monospace";
+      ctx.textAlign = "right";
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeText(`${d}`, plotX - 6, y + 4);
+      ctx.fillStyle = labelColor;
+      ctx.fillText(`${d}`, plotX - 6, y + 4);
+      ctx.textAlign = "left";
+      ctx.lineJoin = "miter";
+    }
   }
 
   if (count === 0) return;
 
   // バー描画（左から並べる、最新が右端）
-  // 棒の色: 縦方向グラデーション（上=32分色(赤), 下=4分色(グレー)）+ 下端に方向インジケータ
+  // 棒の色: グラデーションは「グラフ全高基準で固定」
+  // 上端(PAD_T)=32分色(赤)、下端(yBottom)=4分色(グレー)
+  // → 同じ高さのピクセルは常に同じ色。短いバーは下側のグレー寄りだけ表示され、
+  //    長いバーほど上部の赤い領域までグラデが伸びる
   const DIR_INDICATOR_H = Math.max(1, Math.floor(barW * 0.4)); // 上端の方向色の高さ
+  const yBottomAll = PAD_T + plotH;
+  const barGrad = ctx.createLinearGradient(0, PAD_T, 0, yBottomAll);
+  barGrad.addColorStop(0, NOTE_COLOR(32));   // 上端=32分の赤
+  barGrad.addColorStop(1, "rgb(80,80,80)"); // 下端=ダークグレー
   // 左詰めで配置（右端は固定幅内に収まる）
   for (let i = 0; i < count; i++) {
     const { ms, dir } = intervals[i];
     const x = plotX + i * barW;
-    const yBottom = PAD_T + plotH;
+    const yBottom = yBottomAll;
     const yTop = Math.min(Math.max(PAD_T, msToY(ms)), yBottom - DIR_INDICATOR_H);
     const barH = yBottom - yTop;
-
-    // 縦グラデーション: 下=グレー(4分/遅い) → 上(バー先端)=赤系(32分に近いほど赤)
-    const barDiv = Math.max(4, Math.min(32,
-      Math.round(4 * (60000 / (bpm > 0 ? bpm : 138)) / ms)
-    ));
-    const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
-    grad.addColorStop(0, NOTE_COLOR(barDiv)); // 上端(バー先端)=そのmsの色
-    grad.addColorStop(1, NOTE_COLOR(4));      // 下端=4分=グレー
     const dirColor = dir > 0 ? "#4f8" : "#fa4";
 
     const bx = x, bw = barW - 1;
@@ -356,7 +410,7 @@ function drawBarChart(
       // 上端: 方向インジケータ
       ctx.fillStyle = dirColor;
       ctx.fillRect(bx, yTop, bw, DIR_INDICATOR_H);
-      ctx.fillStyle = grad;
+      ctx.fillStyle = barGrad;
       ctx.fillRect(bx, yTop + DIR_INDICATOR_H, bw, barH - DIR_INDICATOR_H);
     }
   }
@@ -539,6 +593,10 @@ export default function App() {
   // PHOENIX WAN モード (axis 判定方式の切り替え)
   const [phoenixWan, setPhoenixWan] = useState(false);
 
+  // チャートスケール (log / linear)
+  const [chartScale, setChartScale] = useState<"log" | "linear">("linear");
+  const chartScaleRef = useRef<"log" | "linear">("linear");
+
   // ---- モードタブ ----
   type AppMode = "free" | "challenge" | "drill";
   const [appMode, setAppMode] = useState<AppMode>("free");
@@ -605,6 +663,8 @@ export default function App() {
         setClapOn(config.clapOn);
         setPhoenixWan(config.phoenixWan);
         invoke("set_phoenix_wan_mode", { enabled: config.phoenixWan }).catch(console.error);
+        chartScaleRef.current = config.chartScale;
+        setChartScale(config.chartScale);
         if (config.metronome.on && !audioCtxRef.current) {
           audioCtxRef.current = new AudioContext();
           if (audioCtxRef.current.state === "suspended") audioCtxRef.current.resume();
@@ -962,7 +1022,7 @@ export default function App() {
               : cs === "done"
               ? { startIdx: challengeBarStartIdx.current, endIdx: challengeBarEndIdx.current }
               : null;
-            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr);
+            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr, chartScaleRef.current);
           }
         }
       });
@@ -1116,7 +1176,7 @@ export default function App() {
             chartContainerRef.current.scrollLeft = chartContainerRef.current.scrollWidth;
           }
         }
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange);
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange, chartScaleRef.current);
       }
       // チャレンジモード: タイマー更新
       if (challengeStateRef.current === "running") {
@@ -1729,7 +1789,26 @@ export default function App() {
       {/* 棒グラフ (Canvas) */}
       <Card className="w-full">
         <CardHeader className="pb-1 pt-3 px-3">
-          <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
+            <div className="flex gap-1">
+              {(["linear", "log"] as const).map(s => (
+                <Button
+                  key={s}
+                  size="sm"
+                  variant={chartScale === s ? "default" : "outline"}
+                  className="text-[10px] h-6 px-2"
+                  onClick={() => {
+                    setChartScale(s);
+                    chartScaleRef.current = s;
+                    saveConfigToFile({ chartScale: s });
+                  }}
+                >
+                  {s}
+                </Button>
+              ))}
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="px-3 pb-3">
           <div

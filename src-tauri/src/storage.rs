@@ -21,7 +21,7 @@ pub fn write_json(path: &PathBuf, value: &Value) -> Result<(), String> {
 
 pub fn default_config() -> Value {
     json!({
-        "version": 2,
+        "version": 3,
         "keyConfig": {},
         "bpm": 150,
         "greenNum": 1000,
@@ -34,7 +34,8 @@ pub fn default_config() -> Value {
         "side": "1P",
         "clapOn": true,
         "scrOriginWallMs": null,
-        "phoenixWan": false
+        "phoenixWan": false,
+        "chartScale": "linear"
     })
 }
 
@@ -77,7 +78,17 @@ pub fn migrate_config(mut value: Value) -> Value {
         }
     }
 
-    // Future migrations: v2 -> v3, etc.
+    // v2 -> v3: add chartScale
+    if version < 3 {
+        value["version"] = json!(3);
+        if let Some(val_obj) = value.as_object_mut() {
+            if !val_obj.contains_key("chartScale") {
+                val_obj.insert("chartScale".to_string(), json!("linear"));
+            }
+        }
+    }
+
+    // Future migrations: v3 -> v4, etc.
 
     value
 }

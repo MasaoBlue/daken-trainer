@@ -78,6 +78,7 @@ export function migrateFromLocalStorage(): AppConfig | null {
     clapOn: localStorage.getItem("daken-trainer-clap-on") !== "0",
     scrOriginWallMs: scrOriginRaw ? parseFloat(scrOriginRaw) : null,
     phoenixWan: false,
+    chartScale: "linear",
   };
 
   return config;
