@@ -46,6 +46,8 @@ export interface ScrInfo {
   estimatedBpm: number | null;
   offsetMs: number | null;
   noteDivision: string | null;
+  avgIntervalMs: number | null;
+  avgNoteDivision: string | null;
 }
 
 export interface IntervalEntry {

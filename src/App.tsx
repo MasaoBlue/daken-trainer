@@ -600,6 +600,7 @@ export default function App() {
 
   const [scrInfo, setScrInfo] = useState<ScrInfo>({
     count: 0, intervalMs: null, estimatedBpm: null, offsetMs: null, noteDivision: null,
+    avgIntervalMs: null, avgNoteDivision: null,
   });
   const [scrActive, setScrActive] = useState(false);
   const scrIntervalHistRef  = useRef<number[]>([]);
@@ -958,6 +959,8 @@ export default function App() {
         let estimatedBpm: number | null = null;
         let offsetMs: number | null = null;
         let noteDivision: string | null = null;
+        let avgIntervalMs: number | null = null;
+        let avgNoteDivision: string | null = null;
 
         if (scrCountRef.current >= 2 && scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
           intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
@@ -971,6 +974,11 @@ export default function App() {
           if (challengeStateRef.current === "running") {
             challengeIntervalsRef.current.push({ ms: intervalMs, dir });
           }
+
+          // 連続スクラッチ中の interval を蓄積し、平均を算出
+          scrIntervalHistRef.current.push(intervalMs);
+          const sum = scrIntervalHistRef.current.reduce((s, v) => s + v, 0);
+          avgIntervalMs = Math.round(sum / scrIntervalHistRef.current.length);
 
           const elapsedMs = nowJs - scrOriginRef.current;
           if (elapsedMs > 0 && scrCountRef.current >= 2) {
@@ -990,10 +998,13 @@ export default function App() {
           // 音符区分（設定BPMを基準に判定）
           if (bpmVal > 0) {
             noteDivision = nearestNoteDivision(intervalMs, bpmVal);
+            if (avgIntervalMs !== null) {
+              avgNoteDivision = nearestNoteDivision(avgIntervalMs, bpmVal);
+            }
           }
         }
         scrPrevDirTimeRef.current = nowJs;
-        setScrInfo({ count: scrCountRef.current, intervalMs, estimatedBpm, offsetMs, noteDivision });
+        setScrInfo({ count: scrCountRef.current, intervalMs, estimatedBpm, offsetMs, noteDivision, avgIntervalMs, avgNoteDivision });
         setScrActive(true);
       };
 
@@ -1836,13 +1847,17 @@ export default function App() {
             <div className="flex flex-col gap-0.5">
               <span className="text-[10px] text-muted-foreground">間隔</span>
               <span className={`text-right text-sm tabular-nums ${scrActive ? "text-white" : "text-zinc-400"}`}>
-                {scrInfo.intervalMs !== null ? `${scrInfo.intervalMs}ms` : "—"}
+                {scrInfo.intervalMs !== null
+                  ? `${scrInfo.intervalMs}ms${scrInfo.noteDivision ? ` (${scrInfo.noteDivision})` : ""}`
+                  : "—"}
               </span>
             </div>
             <div className="flex flex-col gap-0.5">
-              <span className="text-[10px] text-muted-foreground">音符</span>
-              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-cyan-200" : "text-cyan-700"}`}>
-                {scrInfo.noteDivision ?? "—"}
+              <span className="text-[10px] text-muted-foreground">平均間隔</span>
+              <span className={`text-right text-sm tabular-nums ${scrActive ? "text-white" : "text-zinc-400"}`}>
+                {scrInfo.avgIntervalMs !== null
+                  ? `${scrInfo.avgIntervalMs}ms${scrInfo.avgNoteDivision ? ` (${scrInfo.avgNoteDivision})` : ""}`
+                  : "—"}
               </span>
             </div>
           </CardContent>
