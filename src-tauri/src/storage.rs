@@ -21,7 +21,7 @@ pub fn write_json(path: &PathBuf, value: &Value) -> Result<(), String> {
 
 pub fn default_config() -> Value {
     json!({
-        "version": 1,
+        "version": 2,
         "keyConfig": {},
         "bpm": 150,
         "greenNum": 1000,
@@ -33,7 +33,8 @@ pub fn default_config() -> Value {
         },
         "side": "1P",
         "clapOn": true,
-        "scrOriginWallMs": null
+        "scrOriginWallMs": null,
+        "phoenixWan": false
     })
 }
 
@@ -66,7 +67,17 @@ pub fn migrate_config(mut value: Value) -> Value {
         }
     }
 
-    // Future migrations: v1 -> v2, v2 -> v3, etc.
+    // v1 -> v2: add phoenixWan flag
+    if version < 2 {
+        value["version"] = json!(2);
+        if let Some(val_obj) = value.as_object_mut() {
+            if !val_obj.contains_key("phoenixWan") {
+                val_obj.insert("phoenixWan".to_string(), json!(false));
+            }
+        }
+    }
+
+    // Future migrations: v2 -> v3, etc.
 
     value
 }

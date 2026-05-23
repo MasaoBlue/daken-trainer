@@ -100,6 +100,7 @@ export interface AppConfig {
   side: "1P" | "2P";
   clapOn: boolean;
   scrOriginWallMs: number | null;
+  phoenixWan: boolean;
 }
 
 // ---- 記録型 ----------------------------------------------------------------

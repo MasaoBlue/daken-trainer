@@ -77,6 +77,7 @@ export function migrateFromLocalStorage(): AppConfig | null {
     side: localStorage.getItem("daken-trainer-side") === "2P" ? "2P" : "1P",
     clapOn: localStorage.getItem("daken-trainer-clap-on") !== "0",
     scrOriginWallMs: scrOriginRaw ? parseFloat(scrOriginRaw) : null,
+    phoenixWan: false,
   };
 
   return config;

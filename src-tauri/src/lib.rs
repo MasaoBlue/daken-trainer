@@ -5,6 +5,7 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -14,6 +15,10 @@ static CLAP_MP3: &[u8] = include_bytes!("../assets/clap.mp3");
 
 // フロントエンドから play_clap コマンド経由で使うグローバル送信端
 static AUDIO_TX: OnceLock<mpsc::SyncSender<f32>> = OnceLock::new();
+
+// PHOENIX WAN 等の Linear axis コントローラ向けモード。
+// true のとき pyw 方式 (単純な大小比較、wrap補正・デッドゾーンなし) で axis 方向を判定する。
+static PHOENIX_WAN_MODE: AtomicBool = AtomicBool::new(false);
 
 // ---- 音再生 (専用スレッド1本、スレッド増殖なし) ---------------------------
 
@@ -281,18 +286,22 @@ fn start_gamepad_listener(app: AppHandle, epoch: Instant) {
                         let prev = *prev_axis.get(&axis).unwrap_or(&value);
                         prev_axis.insert(axis, value);
 
-                        // ラップアラウンド補正: 直前との差分を -1.0〜+1.0 に収める
-                        let raw_delta = value - prev;
-                        let delta = if raw_delta > 1.0 {
-                            raw_delta - 2.0
-                        } else if raw_delta < -1.0 {
-                            raw_delta + 2.0
+                        // モードに応じて axis 方向を決定。
+                        // PHOENIX WAN モード: pyw 方式。単純な大小比較のみ。
+                        // 通常モード: wrap補正 + デッドゾーン (リング型 axis 向け)。
+                        let direction: i8 = if PHOENIX_WAN_MODE.load(Ordering::Relaxed) {
+                            if value > prev { 1 } else if value < prev { -1 } else { 0 }
                         } else {
-                            raw_delta
+                            let raw_delta = value - prev;
+                            let delta = if raw_delta > 1.0 {
+                                raw_delta - 2.0
+                            } else if raw_delta < -1.0 {
+                                raw_delta + 2.0
+                            } else {
+                                raw_delta
+                            };
+                            if delta > 0.005 { 1 } else if delta < -0.005 { -1 } else { 0 }
                         };
-
-                        // 方向を delta の符号で決める
-                        let direction: i8 = if delta > 0.005 { 1 } else if delta < -0.005 { -1 } else { 0 };
                         if direction != 0 {
                             let _ = app.emit("input-event", InputEvent::AxisMove {
                                 source: "gamepad".into(),
@@ -324,6 +333,12 @@ fn play_clap() {
     if let Some(tx) = AUDIO_TX.get() {
         let _ = tx.try_send(1.0);
     }
+}
+
+// フロントエンドから axis 判定モードを切り替えるコマンド。
+#[tauri::command]
+fn set_phoenix_wan_mode(enabled: bool) {
+    PHOENIX_WAN_MODE.store(enabled, Ordering::Relaxed);
 }
 
 // ---- ストレージコマンド -------------------------------------------------------
@@ -412,7 +427,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            greet, play_clap,
+            greet, play_clap, set_phoenix_wan_mode,
             read_config, write_config,
             read_records, write_records,
             export_records, get_app_data_dir,

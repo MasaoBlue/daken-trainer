@@ -536,6 +536,9 @@ export default function App() {
   const [assigningTarget, setAssigningTarget] = useState<string | null>(null);
   const assigningRef    = useRef<string | null>(null);
 
+  // PHOENIX WAN モード (axis 判定方式の切り替え)
+  const [phoenixWan, setPhoenixWan] = useState(false);
+
   // ---- モードタブ ----
   type AppMode = "free" | "challenge" | "drill";
   const [appMode, setAppMode] = useState<AppMode>("free");
@@ -600,6 +603,8 @@ export default function App() {
         setSide(config.side);
         clapOnRef.current = config.clapOn;
         setClapOn(config.clapOn);
+        setPhoenixWan(config.phoenixWan);
+        invoke("set_phoenix_wan_mode", { enabled: config.phoenixWan }).catch(console.error);
         if (config.metronome.on && !audioCtxRef.current) {
           audioCtxRef.current = new AudioContext();
           if (audioCtxRef.current.state === "suspended") audioCtxRef.current.resume();
@@ -1875,6 +1880,22 @@ export default function App() {
           <p className="text-sm text-muted-foreground mt-1 text-center">
             左クリック: 入力待ち &nbsp;|&nbsp; 右クリック: 割り当てクリア
           </p>
+
+          <div className="flex items-center gap-2 mt-2 border-t border-border pt-2">
+            <Checkbox
+              id="phoenix-wan"
+              checked={phoenixWan}
+              onCheckedChange={(checked) => {
+                const on = !!checked;
+                setPhoenixWan(on);
+                saveConfigToFile({ phoenixWan: on });
+                invoke("set_phoenix_wan_mode", { enabled: on }).catch(console.error);
+              }}
+            />
+            <Label htmlFor="phoenix-wan" className={`text-xs cursor-pointer ${phoenixWan ? "text-primary" : "text-muted-foreground"}`}>
+              PHOENIXWAN (axis を線形コントローラとして扱う)
+            </Label>
+          </div>
 
           <div className="flex justify-between mt-1">
             <Button variant="secondary" size="sm" onClick={clearAll}>全クリア</Button>
