@@ -1635,7 +1635,7 @@ export default function App() {
                   saveConfigToFile({ clapOn: on });
                 }}
               />
-              <Label htmlFor="clap-on" className={`text-xs cursor-pointer ${clapOn ? "text-primary" : "text-muted-foreground"}`}>
+              <Label htmlFor="clap-on" className="text-xs cursor-pointer">
                 クラップ音 {clapOn ? "ON" : "OFF"}
               </Label>
             </div>
@@ -1657,7 +1657,7 @@ export default function App() {
                     if (on && audioCtxRef.current?.state === "suspended") audioCtxRef.current.resume();
                   }}
                 />
-                <Label htmlFor="metro-on" className={`text-xs cursor-pointer ${metroOn ? "text-primary" : "text-muted-foreground"}`}>
+                <Label htmlFor="metro-on" className="text-xs cursor-pointer">
                   {metroOn ? "ON" : "OFF"}
                 </Label>
               </div>
@@ -1892,7 +1892,7 @@ export default function App() {
                 invoke("set_phoenix_wan_mode", { enabled: on }).catch(console.error);
               }}
             />
-            <Label htmlFor="phoenix-wan" className={`text-xs cursor-pointer ${phoenixWan ? "text-primary" : "text-muted-foreground"}`}>
+            <Label htmlFor="phoenix-wan" className="text-xs cursor-pointer">
               PHOENIXWAN (axis を線形コントローラとして扱う)
             </Label>
           </div>
