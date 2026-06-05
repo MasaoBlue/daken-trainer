@@ -13,7 +13,7 @@ export const SPAN_RETAIN = 600000;
 export const CHART_BAR_W = 10;
 export const CHART_W = 570;
 export const CHART_H = 160;
-export const CHART_PAD_L = 30;
+export const CHART_PAD_L = 42;
 export const GREEN_NUM_DEFAULT = 1000;
 
 // ---- localStorageキー（マイグレーション用に残す） -------------------------
@@ -32,7 +32,7 @@ export const GREEN_NUM_STORAGE_KEY = "daken-trainer-green-num";
 // ---- レーン定義 -----------------------------------------------------------
 
 export const LANE_DEFS: LaneDef[] = [
-  { id: "SCR",  label: "Scratch", w: 90,  noteColor: "#4f8", axisColorPos: "#4f8", axisColorNeg: "#fa4" },
+  { id: "SCR",  label: "Scratch", w: 90,  noteColor: "#4f8", axisColorPos: "#fa4", axisColorNeg: "#4f8" },
   { id: "KEY1", label: "1",   w: 52,  noteColor: "#eee" },
   { id: "KEY2", label: "2",   w: 40,  noteColor: "#48f" },
   { id: "KEY3", label: "3",   w: 52,  noteColor: "#eee" },

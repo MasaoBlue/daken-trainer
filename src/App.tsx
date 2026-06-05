@@ -282,16 +282,19 @@ function computeConstantInfo(
 }
 
 // 現在の linear モード Y軸 range を決定する
-// - Constant モード時: target ± 50ms に zoom
+// - Constant モード時: 許容比率 (±X%) に合わせて zoom (threshold ラインがハミ出ないよう
+//   許容幅の +15% を表示)
 // - それ以外: 1ms 〜 (scrResetMs - 1)
 function computeLinRange(
   constantInfo: { targetMs: number; lowerMs: number; upperMs: number } | null,
   scrResetMs: number,
 ): { minMs: number; maxMs: number } {
   if (constantInfo !== null) {
+    const halfThresholdMs = constantInfo.targetMs - constantInfo.lowerMs; // = target * ratio
+    const halfRange = halfThresholdMs * 1.3; // ±30% の余白を持たせて threshold ラインの外側も見える
     return {
-      minMs: Math.max(1, Math.round(constantInfo.targetMs - 50)),
-      maxMs: Math.round(constantInfo.targetMs + 50),
+      minMs: Math.max(1, Math.round(constantInfo.targetMs - halfRange)),
+      maxMs: Math.round(constantInfo.targetMs + halfRange),
     };
   }
   return { minMs: 1, maxMs: Math.max(2, scrResetMs - 1) };
@@ -338,39 +341,40 @@ function drawYAxisLabels(
     };
     ctx.font = "bold 11px monospace";
     ctx.textAlign = "right";
-    const drawLabel = (ms: number, color: string) => {
+    const drawLabel = (ms: number, color: string, useDecimal: boolean) => {
       const y = msToY(ms);
       if (y < PAD_T || y > PAD_T + plotH) return;
+      const text = useDecimal ? ms.toFixed(1) : `${Math.round(ms)}`;
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 4;
       ctx.lineJoin = "round";
-      ctx.strokeText(`${Math.round(ms)}`, plotX - 6, y + 4);
+      ctx.strokeText(text, plotX - 6, y + 4);
       ctx.fillStyle = color;
-      ctx.fillText(`${Math.round(ms)}`, plotX - 6, y + 4);
+      ctx.fillText(text, plotX - 6, y + 4);
       drawYTick(y, color);
     };
     if (constantInfo) {
-      // Constant モード: 上下限 (オレンジ) と目標 (黄) のみ
-      drawLabel(constantInfo.lowerMs, "#f64");
-      drawLabel(constantInfo.upperMs, "#f64");
-      drawLabel(constantInfo.targetMs, "#ff3");
+      // Constant モード: 上下限 (オレンジ) と目標 (黄) のみ、小数表示
+      drawLabel(constantInfo.lowerMs, "#f64", true);
+      drawLabel(constantInfo.upperMs, "#f64", true);
+      drawLabel(constantInfo.targetMs, "#ff3", true);
     } else {
-      // 通常 linear: 適応的 tick
+      // 通常 linear: 適応的 tick、整数表示
       const TICK_STEP_MS = pickTickStep(linMaxMs - linMinMs);
       const TICK_COLOR = "#888";
       const firstTick = Math.ceil(linMinMs / TICK_STEP_MS) * TICK_STEP_MS;
       for (let ms = firstTick; ms <= linMaxMs; ms += TICK_STEP_MS) {
-        drawLabel(ms, TICK_COLOR);
+        drawLabel(ms, TICK_COLOR, false);
       }
     }
-    // 単位 (ms): 一回り大きく
+    // 単位 (ms): Y軸の最下端 (X軸ラベルと同じ高さ) に表示
     ctx.font = "bold 11px monospace";
     ctx.strokeStyle = "#000";
     ctx.lineWidth = 3;
     ctx.lineJoin = "round";
-    ctx.strokeText("ms", plotX - 6, PAD_T + 10);
+    ctx.strokeText("ms", plotX - 6, h - 6);
     ctx.fillStyle = "#aaa";
-    ctx.fillText("ms", plotX - 6, PAD_T + 10);
+    ctx.fillText("ms", plotX - 6, h - 6);
     ctx.textAlign = "left";
     ctx.lineJoin = "miter";
   } else {
@@ -527,7 +531,13 @@ function drawBarChart(
     drawLine(constantInfo.targetMs, "#ff3", []);
   }
 
-  if (count === 0) return;
+  // グラフ最下端 (X軸) のベースライン
+  ctx.strokeStyle = "#888";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(plotX, PAD_T + plotH + 0.5);
+  ctx.lineTo(w, PAD_T + plotH + 0.5);
+  ctx.stroke();
 
   // バー描画（左から並べる、最新が右端）
   // 棒の色: グラデーションは「グラフ全高基準で固定」
@@ -546,7 +556,7 @@ function drawBarChart(
     const yBottom = yBottomAll;
     const yTop = Math.min(Math.max(PAD_T, msToY(ms)), yBottom - DIR_INDICATOR_H);
     const barH = yBottom - yTop;
-    const dirColor = dir > 0 ? "#4f8" : "#fa4";
+    const dirColor = dir > 0 ? "#fa4" : "#4f8";
 
     const bx = x, bw = barW - 1;
     if (ms === 0) {
@@ -564,7 +574,7 @@ function drawBarChart(
     }
   }
 
-  // X軸ラベル（枚数）: 100以下は1,10,20...50、100超えは50単位
+  // X軸ラベル（枚数）: 1, 10, 20, 30...
   ctx.fillStyle = "#aaa";
   ctx.font = "bold 11px monospace";
   ctx.textAlign = "center";
@@ -832,7 +842,8 @@ export default function App() {
         scrResetMsBaseRef.current = config.scrResetMs;
         setScrResetMsBase(config.scrResetMs);
         scrResetMsRef.current = config.scrResetMs;
-        setAppMode(config.appMode);
+        // Drill は一旦非表示にしているため drill 保存値は free に戻す
+        setAppMode(config.appMode === "drill" ? "free" : config.appMode);
         setConstantThresholdRatio(config.constantThresholdRatio);
         constantThresholdRatioRef.current = config.constantThresholdRatio;
         if (config.metronome.on && !audioCtxRef.current) {
@@ -1592,31 +1603,32 @@ export default function App() {
         </Button>
       </div>
 
-      {/* モードタブ */}
-      <div className="flex gap-1">
-        {([
-          { id: "free" as AppMode, label: "Free" },
-          { id: "challenge" as AppMode, label: "Challenge" },
-          { id: "drill" as AppMode, label: "Drill" },
-          { id: "constant" as AppMode, label: "Constant" },
-        ]).map(m => (
-          <Button
-            key={m.id}
-            size="sm"
-            variant={appMode === m.id ? "default" : "outline"}
-            className="text-xs"
-            onClick={() => {
-              setAppMode(m.id);
-              saveConfigToFile({ appMode: m.id });
-            }}
-          >
-            {m.label}
-          </Button>
-        ))}
-      </div>
-
       {/* メイン行: モード別パネル + canvas + スライダー + 設定パネル */}
       <div className="flex items-start gap-2 overflow-x-auto">
+
+        {/* 左カラム: モード選択ドロップダウン + モード固有カード */}
+        <div className="flex flex-col gap-2 shrink-0 w-[160px]">
+          {/* p-1.5: focus ring (4px outside) が overflow-x-auto 親でクリップされないように上下左右余白を確保 */}
+          <div className="flex items-center gap-2 p-1.5">
+            <Label className="text-xs text-muted-foreground shrink-0">Mode</Label>
+            <Select
+              value={appMode}
+              onValueChange={(v) => {
+                const m = v as AppMode;
+                setAppMode(m);
+                saveConfigToFile({ appMode: m });
+              }}
+            >
+              <SelectTrigger className="h-8 text-xs flex-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="free" className="text-xs">Free</SelectItem>
+                <SelectItem value="challenge" className="text-xs">Challenge</SelectItem>
+                <SelectItem value="constant" className="text-xs">Constant</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
 
         {/* チャレンジモード */}
         {appMode === "challenge" && (
@@ -1827,10 +1839,8 @@ export default function App() {
           />
         )}
 
-        {/* Freeモード: レーン位置固定用スペーサー */}
-        {appMode === "free" && (
-          <div className="shrink-0 w-[160px]" />
-        )}
+        </div>
+        {/* 左カラム end */}
 
         {/* Canvas */}
         <canvas
@@ -2029,9 +2039,9 @@ export default function App() {
               </div>
             </div>
 
-            {/* 連皿しきい値 */}
+            {/* 最大間隔 (連皿しきい値) */}
             <div className="flex items-center justify-between border-t border-border pt-2">
-              <span className="text-xs text-muted-foreground">連皿しきい値</span>
+              <span className="text-xs text-muted-foreground">最大間隔</span>
               <Select
                 value={String(scrResetMsBase)}
                 onValueChange={(v) => {
@@ -2152,7 +2162,7 @@ export default function App() {
                   style={{ left: chartTooltip.x, top: chartTooltip.y - 36, background: "rgba(20,20,20,0.95)" }}
                 >
                   <span className="text-muted-foreground">#{chartTooltip.idx}</span>
-                  <span style={{ color: chartTooltip.entry.dir > 0 ? "#4f8" : "#fa4" }} className="ml-2">
+                  <span style={{ color: chartTooltip.entry.dir > 0 ? "#fa4" : "#4f8" }} className="ml-2">
                     {chartTooltip.entry.dir > 0 ? "↷" : "↶"}
                   </span>
                   <span className="ml-1 text-foreground">{chartTooltip.entry.ms}ms</span>

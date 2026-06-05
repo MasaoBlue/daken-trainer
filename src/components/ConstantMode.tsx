@@ -65,20 +65,22 @@ export default function ConstantMode({
   useEffect(() => { bpmRef.current = bpm; }, [bpm]);
 
   // マウント時 + noteDiv 変更時に親へ通知 (App.tsx でグラフ Y軸 range の計算に利用)
+  // callback は意図的に deps から除外: 親が inline arrow を渡しても無限ループしないように
   useEffect(() => {
     onNoteDivChange?.(noteDiv);
-  }, [noteDiv, onNoteDivChange]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noteDiv]);
 
   // マウント時 + ratio 変更時に親へ通知
   useEffect(() => {
     onThresholdRatioChange?.(thresholdRatio);
-  }, [thresholdRatio, onThresholdRatioChange]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thresholdRatio]);
 
   // 達成カウント・平均
   const achievedRef = useRef(0);
   const [achieved, setAchieved] = useState(0);
   const intervalsRef = useRef<number[]>([]);
-  const [lastInterval, setLastInterval] = useState<number | null>(null);
   const [avgInterval, setAvgInterval] = useState<number | null>(null);
 
   const [result, setResult] = useState<ConstantResult | null>(null);
@@ -124,8 +126,6 @@ export default function ConstantMode({
     const deviation = intervalMs - target;
     const ratio = Math.abs(deviation) / target;
 
-    setLastInterval(intervalMs);
-
     if (ratio > thresholdRatioRef.current) {
       // 失敗 (ズレ過大)
       stop("deviation", intervalMs, Math.round(deviation));
@@ -164,7 +164,6 @@ export default function ConstantMode({
     achievedRef.current = 0;
     setAchieved(0);
     intervalsRef.current = [];
-    setLastInterval(null);
     setAvgInterval(null);
     setResult(null);
     stateRef.current = "ready";
@@ -201,42 +200,47 @@ export default function ConstantMode({
     achievedRef.current = 0;
     setAchieved(0);
     intervalsRef.current = [];
-    setLastInterval(null);
     setAvgInterval(null);
     setResult(null);
     setScrResetMs(null);
   };
 
-  const target = targetIntervalMs();
-  const targetStr = `${target.toFixed(1)}ms`;
+  // 表示用 target は state / props 直参照で常に最新を反映
+  const targetForDisplay = bpm > 0 ? 60000 / bpm / (noteDiv / 4) : 0;
+  const targetStr = bpm > 0 ? `${targetForDisplay.toFixed(1)}ms` : "—";
 
   return (
-    <Card className={`h-fit shrink-0 w-[200px] ${state === "running" ? "border-blue-500/50 shadow-[0_0_8px_rgba(59,130,246,0.2)]" : ""}`}>
+    <Card className={`h-fit shrink-0 w-[160px] ${state === "running" ? "border-blue-500/50 shadow-[0_0_8px_rgba(59,130,246,0.2)]" : ""}`}>
       <CardHeader className="pb-2 pt-3 px-3">
         <CardTitle className="text-xs text-muted-foreground">Constant</CardTitle>
       </CardHeader>
       <CardContent className="px-3 pb-3 flex flex-col gap-2">
-        {/* 音符選択 */}
-        <div className="flex gap-0.5">
-          {NOTE_DIVS.map(d => (
-            <Button
-              key={d}
-              size="sm"
-              variant={noteDiv === d ? "default" : "outline"}
-              className="text-xs h-7 px-0 flex-1 min-w-0"
-              disabled={state === "ready" || state === "running"}
-              onClick={() => {
-                setNoteDiv(d);
-                noteDivRef.current = d;
-              }}
-            >
-              {noteDivLabel(d)}
-            </Button>
-          ))}
+        {/* 間隔 */}
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-xs">間隔</Label>
+          <Select
+            value={String(noteDiv)}
+            disabled={state === "ready" || state === "running"}
+            onValueChange={(v) => {
+              const d = parseInt(v) as NoteDiv;
+              if (!NOTE_DIVS.includes(d as typeof NOTE_DIVS[number])) return;
+              setNoteDiv(d);
+              noteDivRef.current = d;
+            }}
+          >
+            <SelectTrigger className="h-7 w-20 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {NOTE_DIVS.map(d => (
+                <SelectItem key={d} value={String(d)} className="text-xs">{noteDivLabel(d)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* 許容 */}
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
+        <div className="flex items-center justify-between gap-2">
           <Label className="text-xs">許容</Label>
           <Select
             value={String(thresholdRatio)}
@@ -260,7 +264,7 @@ export default function ConstantMode({
         </div>
 
         {/* 目標枚数 */}
-        <div className="flex items-center gap-2 border-t border-border pt-2">
+        <div className="flex items-center gap-2">
           <Checkbox
             id="constant-use-target"
             checked={useTarget}
@@ -309,36 +313,26 @@ export default function ConstantMode({
           </Button>
         )}
 
-        {/* 進行中表示 */}
-        {(state === "ready" || state === "running") && (
-          <div className="flex flex-col gap-1 border-t border-border pt-2">
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">目標</span>
-              <span className="tabular-nums">{targetStr}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-xs text-muted-foreground">連続</span>
-              <span className="text-sm font-bold tabular-nums text-yellow-300">
-                {achieved}{useTarget ? ` / ${targetCount}` : ""}
-              </span>
-            </div>
-            {lastInterval !== null && (
-              <div className="flex justify-between text-xs">
-                <span className="text-muted-foreground">直前</span>
-                <span className="tabular-nums">{lastInterval}ms</span>
-              </div>
-            )}
-            {avgInterval !== null && (
-              <div className="flex justify-between text-xs">
-                <span className="text-muted-foreground">平均</span>
-                <span className="tabular-nums">{avgInterval}ms</span>
-              </div>
-            )}
-            {state === "ready" && (
-              <span className="text-xs text-muted-foreground animate-pulse text-center">入力で開始</span>
-            )}
+        {/* 常時表示: 枚数 / 目標 / 平均 */}
+        <div className="flex flex-col gap-1 border-t border-border pt-2">
+          <div className="flex justify-between">
+            <span className="text-xs text-muted-foreground">枚数</span>
+            <span className={`text-sm font-bold tabular-nums ${achieved > 0 ? "text-yellow-300" : "text-muted"}`}>
+              {achieved > 0 ? `${achieved}${useTarget ? ` / ${targetCount}` : ""}` : "—"}
+            </span>
           </div>
-        )}
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">目標</span>
+            <span className="tabular-nums">{targetStr}</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">平均</span>
+            <span className="tabular-nums">{avgInterval !== null ? `${avgInterval}ms` : "—"}</span>
+          </div>
+          {state === "ready" && (
+            <span className="text-xs text-muted-foreground animate-pulse text-center">入力で開始</span>
+          )}
+        </div>
 
         {/* 結果表示 */}
         {state === "done" && result && (
@@ -350,28 +344,13 @@ export default function ConstantMode({
             ) : (
               <div className="text-sm font-bold text-orange-400 text-center">STOPPED</div>
             )}
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">音符</span>
-              <span className="tabular-nums">{noteDivLabel(result.noteDivision)} ({result.targetIntervalMs}ms)</span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">達成</span>
-              <span className="tabular-nums text-yellow-300">{result.achievedCount}枚</span>
-            </div>
-            {result.avgIntervalMs !== null && (
-              <div className="flex justify-between text-xs">
-                <span className="text-muted-foreground">平均</span>
-                <span className="tabular-nums">{result.avgIntervalMs}ms</span>
-              </div>
-            )}
-            {!result.success && result.failedIntervalMs !== null && result.failedDeviationMs !== null && (
-              <div className="flex flex-col gap-0.5 mt-1 pt-1 border-t border-border">
-                <span className="text-[10px] text-muted-foreground">失敗時</span>
-                <span className="text-xs tabular-nums">
-                  {result.failedIntervalMs}ms
-                  <span className={result.failedDeviationMs > 0 ? "text-orange-400 ml-2" : "text-cyan-400 ml-2"}>
-                    ({result.failedDeviationMs > 0 ? "+" : ""}{result.failedDeviationMs}ms / {result.failedDeviationMs > 0 ? "遅" : "速"})
-                  </span>
+            {result.endReason === "deviation" && result.failedDeviationMs !== null && (
+              <div className="flex items-baseline justify-center gap-2">
+                <span className="text-xs text-muted-foreground tabular-nums">{result.achievedCount + 1}枚目</span>
+                <span className={`text-sm font-bold tabular-nums ${
+                  result.failedDeviationMs < 0 ? "text-blue-400" : "text-red-400"
+                }`}>
+                  {result.failedDeviationMs < 0 ? "FAST" : "SLOW"} {result.failedDeviationMs > 0 ? "+" : ""}{result.failedDeviationMs}ms
                 </span>
               </div>
             )}
