@@ -76,6 +76,7 @@ function drawTimeline(
   timeWindow: number,
   challengeRange: { startMs: number; endMs: number } | null,
   activeLaneId: string | null,
+  gridSub: 4 | 8 | 16,
 ) {
   ctx.clearRect(0, 0, width, CANVAS_H);
   ctx.fillStyle = "#111";
@@ -179,47 +180,61 @@ function drawTimeline(
       ctx.fillStyle = "#777"; ctx.font = "10px monospace";
       ctx.fillText(`${(g / 1000).toFixed(1)}s`, 2, y - 2);
     }
-  } else if (gridMode === "bpm") {
+  } else if (gridMode === "bpm" && bpm > 0 && (gridSub === 4 || gridSub === 8 || gridSub === 16)) {
     const beatMs = 60000 / bpm;
-    const firstBeat = Math.ceil((viewNowMs - timeWindow) / beatMs) * beatMs;
-    let beatIdx = Math.round(firstBeat / beatMs);
-    for (let g = firstBeat; g <= viewNowMs; g += beatMs, beatIdx++) {
+    const subPerBeat = gridSub / 4;       // 4分=1, 8分=2, 16分=4
+    const subPerMeasure = subPerBeat * 4; // 1小節分の sub 個数
+    const subMs = beatMs / subPerBeat;
+    const firstSub = Math.ceil((viewNowMs - timeWindow) / subMs) * subMs;
+    let subIdx = Math.round(firstSub / subMs);
+    for (let g = firstSub; g <= viewNowMs; g += subMs, subIdx++) {
       const y = Math.round(tToY(g));
       if (y < HEADER_H || y > BODY_BOTTOM) continue;
-      const isMeasure = beatIdx % 4 === 0;
-      ctx.strokeStyle = isMeasure ? "#aaa" : "#484848";
+      const isMeasure = subIdx % subPerMeasure === 0;
+      const isBeat    = subIdx % subPerBeat === 0;
+      // 小節線 > 拍線 > 補助線 の順で濃さを変える
+      ctx.strokeStyle = isMeasure ? "#ddd" : isBeat ? "#666" : "#404040";
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
       if (isMeasure) {
-        ctx.fillStyle = "#999"; ctx.font = "10px monospace";
-        ctx.fillText(`${Math.round(beatIdx / 4 + 1)}`, 2, y - 2);
+        ctx.fillStyle = "#ccc"; ctx.font = "10px monospace";
+        ctx.fillText(`${Math.round(subIdx / subPerMeasure + 1)}`, 2, y - 2);
       }
     }
-  } else if (gridMode === "scr" && scrSessions.length > 0) {
+  } else if (gridMode === "scr" && scrSessions.length > 0 && bpm > 0 && (gridSub === 4 || gridSub === 8 || gridSub === 16)) {
     // 各セッションごとに小節線を描画 (スクロールで過去に戻っても当時のグリッドが見える)
     const beatMs = 60000 / bpm;
+    const subPerBeat = gridSub / 4;
+    const subPerMeasure = subPerBeat * 4;
+    const subMs = beatMs / subPerBeat;
     const rangeStart = viewNowMs - timeWindow;
-    for (const session of scrSessions) {
+    for (let si = 0; si < scrSessions.length; si++) {
+      const session = scrSessions[si];
+      const next    = scrSessions[si + 1];
       const origin = session.originMs;
       if (!isFinite(origin)) continue;
-      // 最後の入力から 1 秒間は描画継続
-      const scrGridEnd = session.lastInputMs + 1000;
+      // 最後の入力から 1 秒間は描画継続。
+      // ただし次のセッションが既に始まっていれば、その origin より前で打ち切る
+      // (前セッションの grid が新セッション領域に被さるのを防ぐ)。
+      const tailEnd = session.lastInputMs + 1000;
+      const scrGridEnd = next ? Math.min(tailEnd, next.originMs) : tailEnd;
       // セッションが view 範囲外なら skip
       if (scrGridEnd < rangeStart) continue;
       if (origin > viewNowMs) continue;
-      const firstBeatOffset = Math.ceil((rangeStart - origin) / beatMs);
-      for (let i = firstBeatOffset; ; i++) {
-        const g = origin + i * beatMs;
+      const firstSubOffset = Math.ceil((rangeStart - origin) / subMs);
+      for (let i = firstSubOffset; ; i++) {
+        const g = origin + i * subMs;
         if (g > viewNowMs) break;
         if (g < origin) continue;
         if (g > scrGridEnd) break;
         const y = Math.round(tToY(g));
         if (y < HEADER_H || y > BODY_BOTTOM) continue;
-        const isMeasure = i % 4 === 0;
-        ctx.strokeStyle = isMeasure ? "#aaf" : "#446";
+        const isMeasure = i % subPerMeasure === 0;
+        const isBeat    = i % subPerBeat === 0;
+        ctx.strokeStyle = isMeasure ? "#ddf" : isBeat ? "#668" : "#446";
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
         if (isMeasure) {
-          ctx.fillStyle = "#99b"; ctx.font = "10px monospace";
-          ctx.fillText(`${Math.floor(i / 4) + 1}`, 2, y - 2);
+          ctx.fillStyle = "#ccd"; ctx.font = "10px monospace";
+          ctx.fillText(`${Math.floor(i / subPerMeasure) + 1}`, 2, y - 2);
         }
       }
     }
@@ -625,6 +640,9 @@ export default function App() {
   // グリッド設定
   const [gridMode, setGridMode] = useState<GridMode>("time");
   const gridModeRef = useRef<GridMode>("time");
+  // bpm/scr モード時の補助線間隔 (4分/8分/16分)
+  const [gridSub, setGridSub] = useState<4 | 8 | 16>(4);
+  const gridSubRef = useRef<4 | 8 | 16>(4);
   const [bpm, setBpm] = useState(150);
   const bpmRef = useRef(150);
   const [bpmText, setBpmText] = useState("150");
@@ -769,6 +787,10 @@ export default function App() {
         setGreenNumText(String(config.display.greenNum));
         gridModeRef.current = config.display.gridMode;
         setGridMode(config.display.gridMode);
+        // 旧 config.json に gridSubdivision が無いケースのフォールバック (undefined → 4)
+        const gs = config.display.gridSubdivision ?? 4;
+        gridSubRef.current = gs;
+        setGridSub(gs);
         metroOnRef.current = config.tempo.metronome.on;
         setMetroOn(config.tempo.metronome.on);
         metroDivRef.current = config.tempo.metronome.div;
@@ -1376,7 +1398,7 @@ export default function App() {
         drawTimeline(ctxRef.current, channelsRef.current, viewNowMs, nowMs, pb.mode === "live",
           canvasRef.current.width, scrCountRef.current, gridModeRef.current, bpmRef.current,
           scrSessionsRef.current, orderedLanes,
-          greenNumRef.current * 1000 / 600, cRange, activeLane);
+          greenNumRef.current * 1000 / 600, cRange, activeLane, gridSubRef.current);
       }
       if (chartCtxRef.current && chartCanvasRef.current) {
         const cs = challengeStateRef.current;
@@ -1907,6 +1929,31 @@ export default function App() {
                 </div>
               ))}
             </RadioGroup>
+
+            {/* 補助線間隔 (BPM/Scratch基点 モード時のみ意味あり) */}
+            {(gridMode === "bpm" || gridMode === "scr") && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">補助線</span>
+                <Select
+                  value={String(gridSub)}
+                  onValueChange={(v) => {
+                    const s = Number(v) as 4 | 8 | 16;
+                    setGridSub(s);
+                    gridSubRef.current = s;
+                    updateConfig("display", { gridSubdivision: s });
+                  }}
+                >
+                  <SelectTrigger className="h-7 w-20 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {([4, 8, 16] as const).map(d => (
+                      <SelectItem key={d} value={String(d)} className="text-xs">{d}分</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             {/* BPM（常時表示） */}
             <div className="flex items-center justify-between border-t border-border pt-2">

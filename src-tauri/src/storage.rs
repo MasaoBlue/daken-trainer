@@ -30,6 +30,7 @@ pub fn default_config() -> Value {
             "side": "1P",
             "greenNum": 1000,
             "gridMode": "time",
+            "gridSubdivision": 4,
             "chartScale": "linear"
         },
         "tempo": {

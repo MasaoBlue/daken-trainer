@@ -118,6 +118,8 @@ export interface AppConfig {
     side: "1P" | "2P";
     greenNum: number;
     gridMode: GridMode;
+    // BPM / Scratch基点 グリッド時の補助線間隔 (4=4分, 8=8分, 16=16分)
+    gridSubdivision: 4 | 8 | 16;
     chartScale: "log" | "linear";
   };
   tempo: {
