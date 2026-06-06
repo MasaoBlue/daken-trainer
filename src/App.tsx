@@ -27,12 +27,9 @@ import {
   LANE_DEFS, KEY_DEFS,
 } from "./constants";
 import { nearestNoteDivision, noteColor } from "./lib/noteUtils";
-import {
-  readConfig, writeConfig, readRecords, writeRecords, exportRecords,
-} from "./lib/storage";
+import { readConfig, writeConfig } from "./lib/storage";
 import DrillMode from "./components/DrillMode";
 import ConstantMode from "./components/ConstantMode";
-import RecordsView from "./components/RecordsView";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
 
@@ -756,10 +753,8 @@ export default function App() {
   const [_challengeKeyLabel, setChallengeKeyLabel] = useState("");
   const challengeKeyLabelRef = useRef("");
 
-  // ---- 設定・記録の永続化 ----
+  // ---- 設定の永続化 (記録は一旦無効化) ----
   const [_appConfig, setAppConfig] = useState<AppConfig | null>(null);
-  const [appRecords, setAppRecords] = useState<AppRecords | null>(null);
-  const appRecordsRef = useRef<AppRecords | null>(null);
   const configLoadedRef = useRef(false);
 
   // 日別カウント（メモリ内蓄積用）
@@ -819,14 +814,7 @@ export default function App() {
       } catch (err) {
         console.error("Config load failed:", err);
       }
-      // 記録読み込み
-      try {
-        const records = await readRecords();
-        setAppRecords(records);
-        appRecordsRef.current = records;
-      } catch (err) {
-        console.error("Records load failed:", err);
-      }
+      // 記録機能は一旦無効化 (UI 非表示 + ファイル書き出し停止)
     })();
   }, []);
 
@@ -848,15 +836,10 @@ export default function App() {
     });
   }, []);
 
-  // 記録を保存するヘルパー
-  const saveRecords = useCallback((updater: (prev: AppRecords) => AppRecords) => {
-    setAppRecords(prev => {
-      const base = prev ?? { version: 2, challengeRecords: [], drillRecords: [], rapidPressRecords: [], constantRecords: [], dailyCounts: {} };
-      const updated = updater(base);
-      appRecordsRef.current = updated;
-      writeRecords(updated).catch(console.error);
-      return updated;
-    });
+  // 記録を保存するヘルパー (一旦無効化: ファイル書き出しもメモリ更新もしない)。
+  // 各 *Complete ハンドラ / flushDailyCounts は引き続きこれを呼ぶが内部で no-op。
+  const saveRecords = useCallback((_updater: (prev: AppRecords) => AppRecords) => {
+    // 無効化中。記録機能を復活させる場合はこの中身を元に戻す。
   }, []);
 
   // 日別カウントのflush
@@ -963,19 +946,6 @@ export default function App() {
       constantRecords: [...prev.constantRecords, result],
     }));
   }, [saveRecords]);
-
-  const handleExportRecords = useCallback(async () => {
-    try {
-      // AppDataDirのrecords.jsonを取得してデスクトップに保存
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const dir = await invoke<string>("get_app_data_dir");
-      const exportPath = `${dir}records_export_${timestamp}.json`;
-      await exportRecords(exportPath);
-      alert(`記録をエクスポートしました:\n${exportPath}`);
-    } catch (err) {
-      alert(`エクスポートに失敗しました: ${err}`);
-    }
-  }, []);
 
   // チャンネル取得/作成
   const getOrCreateChannel = useRef((source: string, id: string, kind: "button" | "axis"): Channel => {
@@ -1572,30 +1542,35 @@ export default function App() {
   // KEY_DEFS imported from constants.ts
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-mono p-4 flex flex-col gap-4 items-center">
+    <div className="min-h-screen bg-background text-foreground font-mono p-3 flex flex-col gap-2 items-center">
 
       {/* 操作ボタン */}
       <div className="flex gap-2 items-center">
         <Button
+          size="sm"
           variant="outline"
           onClick={startPlaying}
           disabled={mode === "live" || mode === "playing"}
+          className="h-7 text-xs"
         >
-          <Play className="w-4 h-4" /> ここから再生
+          <Play className="w-3 h-3" /> ここから再生
         </Button>
         <Button
+          size="sm"
           variant={mode !== "live" ? "outline" : "secondary"}
           onClick={goLive}
           disabled={mode === "live"}
+          className="h-7 text-xs"
         >
-          <ChevronsRight className="w-4 h-4" /> ライブに戻る
+          <ChevronsRight className="w-3 h-3" /> ライブに戻る
         </Button>
         <Button
+          size="sm"
           variant="outline"
           onClick={() => setShowConfig(true)}
-          className="ml-auto"
+          className="h-7 text-xs ml-auto"
         >
-          <Settings className="w-4 h-4" /> Key Config
+          <Settings className="w-3 h-3" /> Key Config
         </Button>
       </div>
 
@@ -2195,9 +2170,6 @@ export default function App() {
           </div>
         </CardContent>
       </Card>
-
-      {/* 記録表示 */}
-      <RecordsView records={appRecords} onExport={handleExportRecords} />
 
       {/* キーコンフィグ ダイアログ */}
       <Dialog open={showConfig} onOpenChange={(open) => { if (!open) closeConfig(); }}>
