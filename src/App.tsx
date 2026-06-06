@@ -22,7 +22,7 @@ import type {
   AppConfig, AppMode, AppRecords, ChallengeRecord, DrillResult, RapidPressResult, ConstantResult,
 } from "./types";
 import {
-  CANVAS_H, HEADER_H, AXIS_TIMEOUT, SCR_RESET_MS, SPAN_RETAIN,
+  CANVAS_H, HEADER_H, AXIS_TIMEOUT, SCR_INPUT_DEDUP_MS, SCR_RESET_MS, SPAN_RETAIN,
   CHART_BAR_W, CHART_W, CHART_H, CHART_PAD_L, GREEN_NUM_DEFAULT,
   LANE_DEFS, KEY_DEFS,
 } from "./constants";
@@ -634,11 +634,9 @@ export default function App() {
   const greenNumRef = useRef(GREEN_NUM_DEFAULT);
   const [greenNumText, setGreenNumText] = useState(String(GREEN_NUM_DEFAULT));
 
-  // クラップ音
+  // クラップ音 (発火タイミングは handleScrInput の入力判定 1 箇所に集約)
   const [clapOn, setClapOn] = useState(true);
   const clapOnRef = useRef(true);
-  const clapLastDirRef = useRef(0);
-  const clapLastTimeRef = useRef(-Infinity);
 
   // メトロノーム
   const [metroOn, setMetroOn] = useState(false);
@@ -992,28 +990,43 @@ export default function App() {
       const resolved = resolveChannel(keyConfigRef.current, ev);
       if (resolved === null) return;
 
-      // クラップ音: 方向変化 or 一定時間途切れた後に鳴らす
-      const maybePlayClap = (dir: number, t: number) => {
-        if (!clapOnRef.current) return;
-        if (dir !== clapLastDirRef.current || t - clapLastTimeRef.current > 100) {
-          invoke("play_clap").catch(() => {});
-          clapLastDirRef.current = dir;
-        }
-        clapLastTimeRef.current = t;
-      };
-
-      // SCR 方向変化処理（ButtonDown / AxisMove 共通）
-      // 同じ方向の入力: 最後のイベントから100ms以上途切れたら別入力とみなす
-      const handleScrDirectionChange = (dir: number) => {
-        const isSameDir = dir === scrLastDirRef.current;
-        if (isSameDir && nowJs - scrLastEventTimeRef.current < 100) {
-          scrLastEventTimeRef.current = nowJs;
-          return;
-        }
+      // SCR 入力処理 (AxisMove / ButtonDown 共通の単一エントリポイント)。
+      //
+      //   1. 入力判定 (この関数内のみで実施):
+      //      - 方向が変わった → 新規入力
+      //      - 同方向だが前回イベントから SCR_INPUT_DEDUP_MS 以上経過 → 新規入力
+      //      - それ以外 → 同一スクラッチ継続 (何もしない)
+      //   2. 新規入力と判定されたら、レーンスパン / クラップ音 / カウント・履歴・
+      //      callback / チャレンジモード処理を全てまとめて発火する。
+      //
+      // 「入力判定が通ったら全 downstream が確実に動く」状態を保証することで、
+      // 「音は鳴るのに描画が出ない」「カウントは増えないのに span だけ生える」
+      // といった不整合を構造的に防ぐ。
+      const handleScrInput = (
+        ch: Channel,
+        dir: number,
+        rustT: number | undefined,
+      ) => {
+        // === 入力判定 ===
+        const gap = nowJs - scrLastEventTimeRef.current;
+        const isNewInput = (dir !== scrLastDirRef.current) || (gap >= SCR_INPUT_DEDUP_MS);
+        // 継続判定用 (フィルタ可否によらず last event 時刻は更新)
         scrLastEventTimeRef.current = nowJs;
+        if (!isNewInput) return;
+
         scrLastDirRef.current = dir;
         const prevTime = scrLastTimeRef.current;
         scrLastTimeRef.current = nowJs;
+
+        // === レーンスパン: 既存を閉じて新規を push ===
+        const last = ch.spans.at(-1);
+        if (last && last.end === null) last.end = nowJs;
+        ch.spans.push({ start: nowJs, end: null, direction: dir, rustT });
+
+        // === クラップ音 ===
+        if (clapOnRef.current) invoke("play_clap").catch(() => {});
+
+        // === カウント・履歴・コールバック・チャレンジモード ===
         if (scrCountRef.current === 0) {
           scrOriginRef.current = nowJs;
           scrLastOriginRef.current = nowJs;
@@ -1119,16 +1132,19 @@ export default function App() {
 
       if (ev.kind === "ButtonDown") {
         const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
-        const last = ch.spans.at(-1);
-        if (resolved.kind === "axis" && last && last.end === null && last.direction !== resolved.direction) {
-          last.end = nowJs;
-          ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
-        } else if (!last || last.end !== null) {
-          ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
-        }
         if (resolved.laneId === "SCR" && resolved.direction !== undefined) {
-          if (clapOnRef.current) invoke("play_clap").catch(() => {});
-          handleScrDirectionChange(resolved.direction);
+          // SCR ボタン: AxisMove と同じ統一入力ハンドラに通す。
+          // span push / clap / count は handleScrInput の中で全てまとめて処理する。
+          handleScrInput(ch, resolved.direction, ev.t);
+        } else {
+          // 鍵盤など SCR 以外: 既存のスパン push ロジック
+          const last = ch.spans.at(-1);
+          if (resolved.kind === "axis" && last && last.end === null && last.direction !== resolved.direction) {
+            last.end = nowJs;
+            ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
+          } else if (!last || last.end !== null) {
+            ch.spans.push({ start: nowJs, end: null, rustT: ev.t, direction: resolved.direction });
+          }
         }
         // 鍵盤入力: コールバック通知 + 日別カウント + チャレンジ連打
         if (resolved.laneId.startsWith("KEY")) {
@@ -1160,18 +1176,22 @@ export default function App() {
       } else if (ev.kind === "AxisMove") {
         const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
         const key = `${ev.source}:${resolved.laneId}`;
+        // AXIS_TIMEOUT 用の last event 時刻は継続/新規にかかわらず常に更新
+        // (継続中に span が AXIS_TIMEOUT で閉じてしまうのを防ぐ)
         axisLastRef.current.set(key, nowJs);
-        const last = ch.spans.at(-1);
         const dir = resolved.direction ?? ev.direction;
-        if (!last || last.end !== null) {
-          ch.spans.push({ start: nowJs, end: null, direction: dir });
-        } else if (last.direction !== dir) {
-          last.end = nowJs;
-          ch.spans.push({ start: nowJs, end: null, direction: dir });
-        }
         if (resolved.laneId === "SCR") {
-          maybePlayClap(dir, nowJs);
-          handleScrDirectionChange(dir);
+          // SCR: span push / clap / count は全て handleScrInput 内で判定後に発火
+          handleScrInput(ch, dir, undefined);
+        } else {
+          // SCR 以外の axis lane (現状は無し、将来用): 既存スパンロジック
+          const last = ch.spans.at(-1);
+          if (!last || last.end !== null) {
+            ch.spans.push({ start: nowJs, end: null, direction: dir });
+          } else if (last.direction !== dir) {
+            last.end = nowJs;
+            ch.spans.push({ start: nowJs, end: null, direction: dir });
+          }
         }
       }
     });
@@ -1289,7 +1309,11 @@ export default function App() {
         }
       });
 
-      if (scrCountRef.current > 0 && nowMs - scrLastTimeRef.current > scrResetMsRef.current) {
+      // Session reset 判定は「全イベント (継続フィルタ含む) が止まってから scrResetMs 経過」で行う。
+      // scrLastTimeRef (= 直近にカウントされた入力) を使うと、ゆっくり同方向回転中に
+      // 継続イベントが filter され続けていても scrLastTimeRef が更新されないため、
+      // 入力が来ているのに session reset が走ってしまい「一定間隔で1枚目」が再発する。
+      if (scrCountRef.current > 0 && nowMs - scrLastEventTimeRef.current > scrResetMsRef.current) {
         const finalCount = scrCountRef.current;
         const firstDir = scrFirstDirRef.current;
         scrCountRef.current = 0;

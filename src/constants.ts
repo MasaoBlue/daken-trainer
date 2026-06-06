@@ -7,7 +7,14 @@ export const CONSTANT_THRESHOLD_RATIO = 0.30;
 
 export const CANVAS_H = 600;
 export const HEADER_H = 40;
-export const AXIS_TIMEOUT = 150;
+// SCR 同一入力判定の最大間隔 (ms)。
+// 同方向の axis/button イベントがこの間隔以内に連続する限り「1 回のスクラッチ」として扱う。
+// クラップ音発火・スパン描画・カウント加算は全てこの判定 1 箇所のみが起点。
+export const SCR_INPUT_DEDUP_MS = 300;
+// AXIS_TIMEOUT は「axis が来なくなったら現スパンを閉じる」閾値。
+// SCR_INPUT_DEDUP_MS より小さいと「カウント上は同一入力継続なのに span は閉じてる」
+// という不整合が出るので、SCR_INPUT_DEDUP_MS と同値以上に揃える。
+export const AXIS_TIMEOUT = SCR_INPUT_DEDUP_MS;
 export const SCR_RESET_MS = 500;
 export const SPAN_RETAIN = 600000;
 export const CHART_BAR_W = 10;
