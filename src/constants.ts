@@ -16,18 +16,8 @@ export const CHART_H = 160;
 export const CHART_PAD_L = 42;
 export const GREEN_NUM_DEFAULT = 1000;
 
-// ---- localStorageキー（マイグレーション用に残す） -------------------------
-
-export const STORAGE_KEY = "daken-trainer-keyconfig";
-export const BPM_STORAGE_KEY = "daken-trainer-bpm";
-export const SCR_ORIGIN_STORAGE_KEY = "daken-trainer-scr-origin";
-export const GRID_MODE_STORAGE_KEY = "daken-trainer-grid-mode";
-export const METRO_ON_KEY = "daken-trainer-metro-on";
-export const METRO_DIV_KEY = "daken-trainer-metro-div";
-export const METRO_VOL_KEY = "daken-trainer-metro-vol";
-export const SIDE_KEY = "daken-trainer-side";
-export const CLAP_ON_KEY = "daken-trainer-clap-on";
-export const GREEN_NUM_STORAGE_KEY = "daken-trainer-green-num";
+// 旧 localStorage キーはマイグレーション専用となったため lib/storage.ts に
+// 集約 (こちらからは削除)。
 
 // ---- レーン定義 -----------------------------------------------------------
 

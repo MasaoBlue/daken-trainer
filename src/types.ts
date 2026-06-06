@@ -106,25 +106,41 @@ export interface ConstantResult {
 
 // ---- 設定型 ----------------------------------------------------------------
 
+export type AppMode = "free" | "challenge" | "drill" | "constant";
+
 export interface AppConfig {
   version: number;
-  keyConfig: KeyConfig;
-  bpm: number;
-  greenNum: number;
-  gridMode: GridMode;
-  metronome: {
-    on: boolean;
-    div: 4 | 8;
-    vol: number;
+  input: {
+    keyConfig: KeyConfig;
+    phoenixWan: boolean;
   };
-  side: "1P" | "2P";
-  clapOn: boolean;
-  scrOriginWallMs: number | null;
-  phoenixWan: boolean;
-  chartScale: "log" | "linear";
-  scrResetMs: number; // 連皿しきい値 (ms)。500/400/300 から選択
-  appMode: "free" | "challenge" | "drill" | "constant";
-  constantThresholdRatio: number; // Constant モードの許容比率 (0.10〜0.50、0.10刻み)
+  display: {
+    side: "1P" | "2P";
+    greenNum: number;
+    gridMode: GridMode;
+    chartScale: "log" | "linear";
+  };
+  tempo: {
+    bpm: number;
+    metronome: {
+      on: boolean;
+      div: 4 | 8;
+      vol: number;
+    };
+  };
+  scratch: {
+    clapOn: boolean;
+    resetMs: number; // 連皿しきい値 (ms)。500/400/300 から選択
+  };
+  modes: {
+    current: AppMode;
+    // 各モード固有設定 (将来拡張枠として常設)
+    challenge: Record<string, never>;
+    constant: {
+      thresholdRatio: number; // 許容比率 (0.10〜0.50、0.10刻み)
+    };
+    drill: Record<string, never>;
+  };
 }
 
 // ---- 記録型 ----------------------------------------------------------------

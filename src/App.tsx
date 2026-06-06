@@ -19,32 +19,22 @@ import "./App.css";
 import type {
   InputEvent, Binding, KeyConfig, Channel, LaneDef,
   GridMode, ScrInfo, IntervalEntry, ChallengeState,
-  AppConfig, AppRecords, ChallengeRecord, DrillResult, RapidPressResult, ConstantResult,
+  AppConfig, AppMode, AppRecords, ChallengeRecord, DrillResult, RapidPressResult, ConstantResult,
 } from "./types";
 import {
   CANVAS_H, HEADER_H, AXIS_TIMEOUT, SCR_RESET_MS, SPAN_RETAIN,
   CHART_BAR_W, CHART_W, CHART_H, CHART_PAD_L, GREEN_NUM_DEFAULT,
-  STORAGE_KEY, BPM_STORAGE_KEY, SCR_ORIGIN_STORAGE_KEY, GRID_MODE_STORAGE_KEY,
-  METRO_ON_KEY, METRO_DIV_KEY, METRO_VOL_KEY, SIDE_KEY, CLAP_ON_KEY,
-  GREEN_NUM_STORAGE_KEY, LANE_DEFS, KEY_DEFS,
+  LANE_DEFS, KEY_DEFS,
 } from "./constants";
 import { nearestNoteDivision, noteColor } from "./lib/noteUtils";
 import {
-  readConfig, writeConfig, readRecords, writeRecords,
-  exportRecords, migrateFromLocalStorage, clearLocalStorage,
+  readConfig, writeConfig, readRecords, writeRecords, exportRecords,
 } from "./lib/storage";
 import DrillMode from "./components/DrillMode";
 import ConstantMode from "./components/ConstantMode";
 import RecordsView from "./components/RecordsView";
 
 // ---- キーコンフィグ ユーティリティ -----------------------------------------
-
-function loadConfig(): KeyConfig {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"); } catch { return {}; }
-}
-function saveConfig(cfg: KeyConfig) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-}
 
 function resolveChannel(
   cfg: KeyConfig,
@@ -630,71 +620,39 @@ export default function App() {
   const [_channelCount, setChannelCount] = useState(0);
   const [mode, setMode] = useState<PlaybackMode>("live");
 
+  // 設定値の state/ref は最初ハードコードのデフォルトで初期化。
+  // 起動直後の useEffect で config.json から読み込んだ値で上書きされる。
   // グリッド設定
-  const [gridMode, setGridMode] = useState<GridMode>(() => {
-    const v = localStorage.getItem(GRID_MODE_STORAGE_KEY);
-    return (v === "bpm" || v === "scr") ? v : "time";
-  });
-  const gridModeRef = useRef<GridMode>((() => {
-    const v = localStorage.getItem(GRID_MODE_STORAGE_KEY);
-    return (v === "bpm" || v === "scr") ? v : "time";
-  })());
-  const [bpm, setBpm] = useState(() => {
-    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "150");
-    return isNaN(v) ? 150 : v;
-  });
-  const bpmRef = useRef((() => {
-    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "150");
-    return isNaN(v) ? 150 : v;
-  })());
-  const [bpmText, setBpmText] = useState(() => {
-    const v = parseInt(localStorage.getItem(BPM_STORAGE_KEY) ?? "150");
-    return String(isNaN(v) ? 150 : v);
-  });
+  const [gridMode, setGridMode] = useState<GridMode>("time");
+  const gridModeRef = useRef<GridMode>("time");
+  const [bpm, setBpm] = useState(150);
+  const bpmRef = useRef(150);
+  const [bpmText, setBpmText] = useState("150");
 
   // 緑数字
-  const [_greenNum, setGreenNum] = useState(() => {
-    const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
-    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v));
-  });
-  const greenNumRef = useRef((() => {
-    const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
-    return isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v));
-  })());
-  const [greenNumText, setGreenNumText] = useState(() => {
-    const v = parseInt(localStorage.getItem(GREEN_NUM_STORAGE_KEY) ?? String(GREEN_NUM_DEFAULT));
-    return String(isNaN(v) ? GREEN_NUM_DEFAULT : Math.max(100, Math.min(3000, v)));
-  });
+  const [_greenNum, setGreenNum] = useState(GREEN_NUM_DEFAULT);
+  const greenNumRef = useRef(GREEN_NUM_DEFAULT);
+  const [greenNumText, setGreenNumText] = useState(String(GREEN_NUM_DEFAULT));
 
   // クラップ音
-  const [clapOn, setClapOn] = useState(() => localStorage.getItem(CLAP_ON_KEY) !== "0");
-  const clapOnRef = useRef(localStorage.getItem(CLAP_ON_KEY) !== "0");
+  const [clapOn, setClapOn] = useState(true);
+  const clapOnRef = useRef(true);
   const clapLastDirRef = useRef(0);
   const clapLastTimeRef = useRef(-Infinity);
 
   // メトロノーム
-  const [metroOn, setMetroOn] = useState(() => localStorage.getItem(METRO_ON_KEY) === "1");
-  const metroOnRef = useRef(localStorage.getItem(METRO_ON_KEY) === "1");
-  const [metroDiv, setMetroDiv] = useState<4 | 8>(() => localStorage.getItem(METRO_DIV_KEY) === "8" ? 8 : 4);
-  const metroDivRef = useRef<4 | 8>(localStorage.getItem(METRO_DIV_KEY) === "8" ? 8 : 4);
-  const [metroVol, setMetroVol] = useState(() => {
-    const v = parseFloat(localStorage.getItem(METRO_VOL_KEY) ?? "0.5");
-    return isNaN(v) ? 0.5 : Math.max(0, Math.min(1, v));
-  });
-  const metroVolRef = useRef((() => {
-    const v = parseFloat(localStorage.getItem(METRO_VOL_KEY) ?? "0.5");
-    return isNaN(v) ? 0.5 : Math.max(0, Math.min(1, v));
-  })());
+  const [metroOn, setMetroOn] = useState(false);
+  const metroOnRef = useRef(false);
+  const [metroDiv, setMetroDiv] = useState<4 | 8>(4);
+  const metroDivRef = useRef<4 | 8>(4);
+  const [metroVol, setMetroVol] = useState(0.5);
+  const metroVolRef = useRef(0.5);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const metroNextBeatRef = useRef<number | null>(null);
 
   // 1P / 2P
-  const [side, setSide] = useState<"1P" | "2P">(() =>
-    localStorage.getItem(SIDE_KEY) === "2P" ? "2P" : "1P"
-  );
-  const sideRef = useRef<"1P" | "2P">(
-    localStorage.getItem(SIDE_KEY) === "2P" ? "2P" : "1P"
-  );
+  const [side, setSide] = useState<"1P" | "2P">("1P");
+  const sideRef = useRef<"1P" | "2P">("1P");
 
   // SCR カウント・情報
   const [_scrCount, setScrCount] = useState(0);
@@ -711,11 +669,9 @@ export default function App() {
   const scrIntervalHistRef  = useRef<number[]>([]);
   const scrPrevDirTimeRef   = useRef<number | null>(null);
   const scrOriginRef        = useRef<number>(-Infinity);
-  const scrLastOriginRef    = useRef<number>((() => {
-    const saved = parseFloat(localStorage.getItem(SCR_ORIGIN_STORAGE_KEY) ?? "");
-    if (!isFinite(saved)) return -Infinity;
-    return -(Date.now() - saved);
-  })());
+  // gridMode === "scr" 時の offsetMs 計算用。アプリ起動時は -Infinity、
+  // 最初のスクラッチ (count 0→1) でセッション基点が設定される。
+  const scrLastOriginRef    = useRef<number>(-Infinity);
   // SCR セッション履歴: 過去にスクラッチした各 run の origin/lastInput を保持し、
   // スクロールで過去に戻ったときも当時の小節線が描画されるように使う
   const scrSessionsRef      = useRef<Array<{ originMs: number; lastInputMs: number }>>([]);
@@ -748,9 +704,9 @@ export default function App() {
     noteDivision: string | null;
   } | null>(null);
 
-  // キーコンフィグ
-  const [keyConfig, setKeyConfig] = useState<KeyConfig>(loadConfig);
-  const keyConfigRef    = useRef<KeyConfig>(loadConfig());
+  // キーコンフィグ (config 読み込みまでは空、async useEffect で上書き)
+  const [keyConfig, setKeyConfig] = useState<KeyConfig>({});
+  const keyConfigRef    = useRef<KeyConfig>({});
   const [showConfig, setShowConfig] = useState(false);
   const [assigningTarget, setAssigningTarget] = useState<string | null>(null);
   const assigningRef    = useRef<string | null>(null);
@@ -763,7 +719,6 @@ export default function App() {
   const chartScaleRef = useRef<"log" | "linear">("linear");
 
   // ---- モードタブ ----
-  type AppMode = AppConfig["appMode"];
   const [appMode, setAppMode] = useState<AppMode>("free");
   const appModeRef = useRef<AppMode>("free");
   useEffect(() => { appModeRef.current = appMode; }, [appMode]);
@@ -796,57 +751,48 @@ export default function App() {
   const dailyKeyPressCountRef = useRef(0);
   const lastFlushRef = useRef(Date.now());
 
-  // 起動時: 設定読み込み + localStorageマイグレーション
+  // 起動時: 設定ファイル読み込み
   useEffect(() => {
     if (configLoadedRef.current) return;
     configLoadedRef.current = true;
     (async () => {
       try {
-        let config = await readConfig();
-        // localStorageにデータがあればマイグレーション
-        const migrated = migrateFromLocalStorage();
-        if (migrated) {
-          // localStorageの値をマージ（既存JSONファイルよりlocalStorageを優先）
-          config = { ...config, ...migrated };
-          await writeConfig(config);
-          clearLocalStorage();
-        }
+        const config = await readConfig();
         setAppConfig(config);
-        // 設定値をstateとrefに反映
-        if (config.keyConfig && Object.keys(config.keyConfig).length > 0) {
-          keyConfigRef.current = config.keyConfig;
-          setKeyConfig(config.keyConfig);
-        }
-        bpmRef.current = config.bpm;
-        setBpm(config.bpm);
-        setBpmText(String(config.bpm));
-        greenNumRef.current = config.greenNum;
-        setGreenNum(config.greenNum);
-        setGreenNumText(String(config.greenNum));
-        gridModeRef.current = config.gridMode;
-        setGridMode(config.gridMode);
-        metroOnRef.current = config.metronome.on;
-        setMetroOn(config.metronome.on);
-        metroDivRef.current = config.metronome.div;
-        setMetroDiv(config.metronome.div);
-        metroVolRef.current = config.metronome.vol;
-        setMetroVol(config.metronome.vol);
-        sideRef.current = config.side;
-        setSide(config.side);
-        clapOnRef.current = config.clapOn;
-        setClapOn(config.clapOn);
-        setPhoenixWan(config.phoenixWan);
-        invoke("set_phoenix_wan_mode", { enabled: config.phoenixWan }).catch(console.error);
-        chartScaleRef.current = config.chartScale;
-        setChartScale(config.chartScale);
-        scrResetMsBaseRef.current = config.scrResetMs;
-        setScrResetMsBase(config.scrResetMs);
-        scrResetMsRef.current = config.scrResetMs;
+        // 設定値をstateとrefに反映 (config が source of truth)
+        const cfgKey = config.input.keyConfig ?? {};
+        keyConfigRef.current = cfgKey;
+        setKeyConfig(cfgKey);
+        bpmRef.current = config.tempo.bpm;
+        setBpm(config.tempo.bpm);
+        setBpmText(String(config.tempo.bpm));
+        greenNumRef.current = config.display.greenNum;
+        setGreenNum(config.display.greenNum);
+        setGreenNumText(String(config.display.greenNum));
+        gridModeRef.current = config.display.gridMode;
+        setGridMode(config.display.gridMode);
+        metroOnRef.current = config.tempo.metronome.on;
+        setMetroOn(config.tempo.metronome.on);
+        metroDivRef.current = config.tempo.metronome.div;
+        setMetroDiv(config.tempo.metronome.div);
+        metroVolRef.current = config.tempo.metronome.vol;
+        setMetroVol(config.tempo.metronome.vol);
+        sideRef.current = config.display.side;
+        setSide(config.display.side);
+        clapOnRef.current = config.scratch.clapOn;
+        setClapOn(config.scratch.clapOn);
+        setPhoenixWan(config.input.phoenixWan);
+        invoke("set_phoenix_wan_mode", { enabled: config.input.phoenixWan }).catch(console.error);
+        chartScaleRef.current = config.display.chartScale;
+        setChartScale(config.display.chartScale);
+        scrResetMsBaseRef.current = config.scratch.resetMs;
+        setScrResetMsBase(config.scratch.resetMs);
+        scrResetMsRef.current = config.scratch.resetMs;
         // Drill は一旦非表示にしているため drill 保存値は free に戻す
-        setAppMode(config.appMode === "drill" ? "free" : config.appMode);
-        setConstantThresholdRatio(config.constantThresholdRatio);
-        constantThresholdRatioRef.current = config.constantThresholdRatio;
-        if (config.metronome.on && !audioCtxRef.current) {
+        setAppMode(config.modes.current === "drill" ? "free" : config.modes.current);
+        setConstantThresholdRatio(config.modes.constant.thresholdRatio);
+        constantThresholdRatioRef.current = config.modes.constant.thresholdRatio;
+        if (config.tempo.metronome.on && !audioCtxRef.current) {
           audioCtxRef.current = new AudioContext();
           if (audioCtxRef.current.state === "suspended") audioCtxRef.current.resume();
         }
@@ -864,11 +810,19 @@ export default function App() {
     })();
   }, []);
 
-  // 設定を保存するヘルパー
-  const saveConfigToFile = useCallback((partial: Partial<AppConfig>) => {
+  // 設定を保存するヘルパー (グループ単位で部分更新)。
+  // 例: updateConfig("tempo", { bpm: 200 }) で tempo セクションだけマージ保存。
+  type ConfigSection = "input" | "display" | "tempo" | "scratch" | "modes";
+  const updateConfig = useCallback(<K extends ConfigSection>(
+    section: K,
+    partial: Partial<AppConfig[K]>,
+  ) => {
     setAppConfig(prev => {
       if (!prev) return prev;
-      const updated = { ...prev, ...partial };
+      const updated: AppConfig = {
+        ...prev,
+        [section]: { ...prev[section], ...partial },
+      };
       writeConfig(updated).catch(console.error);
       return updated;
     });
@@ -1030,8 +984,7 @@ export default function App() {
         const newCfg = { ...keyConfigRef.current, [target]: binding };
         keyConfigRef.current = newCfg;
         setKeyConfig(newCfg);
-        saveConfig(newCfg);
-        saveConfigToFile({ keyConfig: newCfg });
+        updateConfig("input", { keyConfig: newCfg });
         // 同じボタンの再割り当てができるよう assigningTarget はリセットしない
         return;
       }
@@ -1064,9 +1017,6 @@ export default function App() {
         if (scrCountRef.current === 0) {
           scrOriginRef.current = nowJs;
           scrLastOriginRef.current = nowJs;
-          const wallNow = Date.now() - performance.now() + nowJs + startRef.current;
-          localStorage.setItem(SCR_ORIGIN_STORAGE_KEY, String(wallNow));
-          saveConfigToFile({ scrOriginWallMs: wallNow });
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
           // 新しい SCR セッションを履歴に追加
@@ -1562,13 +1512,13 @@ export default function App() {
   const startAssigning = (target: string) => { assigningRef.current = target; setAssigningTarget(target); };
   const clearBinding = (target: string) => {
     const newCfg = { ...keyConfigRef.current, [target]: null };
-    keyConfigRef.current = newCfg; setKeyConfig(newCfg); saveConfig(newCfg);
-    saveConfigToFile({ keyConfig: newCfg });
+    keyConfigRef.current = newCfg; setKeyConfig(newCfg);
+    updateConfig("input", { keyConfig: newCfg });
   };
   const clearAll = () => {
     const newCfg: KeyConfig = {};
-    keyConfigRef.current = newCfg; setKeyConfig(newCfg); saveConfig(newCfg);
-    saveConfigToFile({ keyConfig: newCfg });
+    keyConfigRef.current = newCfg; setKeyConfig(newCfg);
+    updateConfig("input", { keyConfig: newCfg });
     assigningRef.current = null; setAssigningTarget(null);
   };
   const closeConfig = () => { assigningRef.current = null; setAssigningTarget(null); setShowConfig(false); };
@@ -1616,7 +1566,7 @@ export default function App() {
               onValueChange={(v) => {
                 const m = v as AppMode;
                 setAppMode(m);
-                saveConfigToFile({ appMode: m });
+                updateConfig("modes", { current: m });
               }}
             >
               <SelectTrigger className="h-8 text-xs flex-1">
@@ -1827,7 +1777,7 @@ export default function App() {
             onThresholdRatioChange={(r) => {
               constantThresholdRatioRef.current = r;
               setConstantThresholdRatio(r);
-              saveConfigToFile({ constantThresholdRatio: r });
+              updateConfig("modes", { constant: { thresholdRatio: r } });
               // overlay (上下限ライン位置が変わる) を再描画
               if (axisCtxRef.current) {
                 const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, r);
@@ -1874,8 +1824,7 @@ export default function App() {
               onValueChange={(v) => {
                 const s = v as "1P" | "2P";
                 setSide(s); sideRef.current = s;
-                localStorage.setItem(SIDE_KEY, s);
-                saveConfigToFile({ side: s });
+                updateConfig("display", { side: s });
               }}
               className="flex gap-3"
             >
@@ -1899,8 +1848,7 @@ export default function App() {
                   const v = parseInt(e.target.value);
                   if (!isNaN(v) && v >= 100 && v <= 3000) {
                     setGreenNum(v); greenNumRef.current = v;
-                    localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(v));
-                    saveConfigToFile({ greenNum: v });
+                    updateConfig("display", { greenNum: v });
                   }
                 }}
                 onBlur={e => {
@@ -1908,8 +1856,7 @@ export default function App() {
                   const resolved = (!isNaN(v) && v >= 100 && v <= 3000) ? v : GREEN_NUM_DEFAULT;
                   setGreenNum(resolved); greenNumRef.current = resolved;
                   setGreenNumText(String(resolved));
-                  localStorage.setItem(GREEN_NUM_STORAGE_KEY, String(resolved));
-                  saveConfigToFile({ greenNum: resolved });
+                  updateConfig("display", { greenNum: resolved });
                 }}
                 className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
               />
@@ -1923,8 +1870,7 @@ export default function App() {
               onValueChange={(v) => {
                 const m = v as GridMode;
                 setGridMode(m); gridModeRef.current = m;
-                localStorage.setItem(GRID_MODE_STORAGE_KEY, m);
-                saveConfigToFile({ gridMode: m });
+                updateConfig("display", { gridMode: m });
               }}
               className="flex flex-col gap-1"
             >
@@ -1951,8 +1897,7 @@ export default function App() {
                   if (!isNaN(v) && v >= 1 && v <= 999) {
                     setBpm(v); bpmRef.current = v;
                     metroNextBeatRef.current = null;
-                    localStorage.setItem(BPM_STORAGE_KEY, String(v));
-                    saveConfigToFile({ bpm: v });
+                    updateConfig("tempo", { bpm: v });
                   }
                 }}
                 onBlur={e => {
@@ -1961,8 +1906,7 @@ export default function App() {
                   setBpm(resolved); bpmRef.current = resolved;
                   setBpmText(String(resolved));
                   metroNextBeatRef.current = null;
-                  localStorage.setItem(BPM_STORAGE_KEY, String(resolved));
-                  saveConfigToFile({ bpm: resolved });
+                  updateConfig("tempo", { bpm: resolved });
                 }}
                 className="w-16 bg-input border border-border text-foreground font-mono text-sm px-1.5 py-0.5 rounded"
               />
@@ -1976,8 +1920,7 @@ export default function App() {
                 onCheckedChange={(checked) => {
                   const on = !!checked;
                   setClapOn(on); clapOnRef.current = on;
-                  localStorage.setItem(CLAP_ON_KEY, on ? "1" : "0");
-                  saveConfigToFile({ clapOn: on });
+                  updateConfig("scratch", { clapOn: on });
                 }}
               />
               <Label htmlFor="clap-on" className="text-xs cursor-pointer">
@@ -1996,8 +1939,7 @@ export default function App() {
                     const on = !!checked;
                     setMetroOn(on); metroOnRef.current = on;
                     metroNextBeatRef.current = null;
-                    localStorage.setItem(METRO_ON_KEY, on ? "1" : "0");
-                    saveConfigToFile({ metronome: { on, div: metroDivRef.current, vol: metroVolRef.current } });
+                    updateConfig("tempo", { metronome: { on, div: metroDivRef.current, vol: metroVolRef.current } });
                     if (on && !audioCtxRef.current) audioCtxRef.current = new AudioContext();
                     if (on && audioCtxRef.current?.state === "suspended") audioCtxRef.current.resume();
                   }}
@@ -2012,8 +1954,7 @@ export default function App() {
                   const d = Number(v) as 4 | 8;
                   setMetroDiv(d); metroDivRef.current = d;
                   metroNextBeatRef.current = null;
-                  localStorage.setItem(METRO_DIV_KEY, v);
-                  saveConfigToFile({ metronome: { on: metroOnRef.current, div: d, vol: metroVolRef.current } });
+                  updateConfig("tempo", { metronome: { on: metroOnRef.current, div: d, vol: metroVolRef.current } });
                 }}
                 className="flex gap-3"
               >
@@ -2031,8 +1972,7 @@ export default function App() {
                   value={[metroVol]}
                   onValueChange={([v]) => {
                     setMetroVol(v); metroVolRef.current = v;
-                    localStorage.setItem(METRO_VOL_KEY, String(v));
-                    saveConfigToFile({ metronome: { on: metroOnRef.current, div: metroDivRef.current, vol: v } });
+                    updateConfig("tempo", { metronome: { on: metroOnRef.current, div: metroDivRef.current, vol: v } });
                   }}
                   className="w-20"
                 />
@@ -2050,7 +1990,7 @@ export default function App() {
                   setScrResetMsBase(ms);
                   scrResetMsBaseRef.current = ms;
                   scrResetMsRef.current = ms;
-                  saveConfigToFile({ scrResetMs: ms });
+                  updateConfig("scratch", { resetMs: ms });
                 }}
               >
                 <SelectTrigger className="h-7 w-20 text-xs">
@@ -2113,7 +2053,7 @@ export default function App() {
                   onClick={() => {
                     setChartScale(s);
                     chartScaleRef.current = s;
-                    saveConfigToFile({ chartScale: s });
+                    updateConfig("display", { chartScale: s });
                   }}
                 >
                   {s}
@@ -2288,7 +2228,7 @@ export default function App() {
               onCheckedChange={(checked) => {
                 const on = !!checked;
                 setPhoenixWan(on);
-                saveConfigToFile({ phoenixWan: on });
+                updateConfig("input", { phoenixWan: on });
                 invoke("set_phoenix_wan_mode", { enabled: on }).catch(console.error);
               }}
             />
