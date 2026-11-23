@@ -9,12 +9,16 @@ import {
 import type { ConstantState, ConstantResult } from "../types";
 
 interface ConstantModeProps {
-  onScratchInterval: (cb: (intervalMs: number, dir: number) => void) => void;
-  offScratchInterval: (cb: (intervalMs: number, dir: number) => void) => void;
-  onScratchChange: (cb: (count: number, dir: number) => void) => void;
-  offScratchChange: (cb: (count: number, dir: number) => void) => void;
-  onScratchReset: (cb: (finalCount: number, firstDir: number) => void) => void;
-  offScratchReset: (cb: (finalCount: number, firstDir: number) => void) => void;
+  // 任意レーンの最初の入力を検出 (ready→running 遷移用)
+  onAnyInput: (cb: (laneId: string, nowJs: number) => void) => void;
+  offAnyInput: (cb: (laneId: string, nowJs: number) => void) => void;
+  // graphLane の interval / session reset 通知
+  onGraphLaneInterval: (cb: (intervalMs: number, dir: number) => void) => void;
+  offGraphLaneInterval: (cb: (intervalMs: number, dir: number) => void) => void;
+  onGraphLaneReset: (cb: (finalCount: number) => void) => void;
+  offGraphLaneReset: (cb: (finalCount: number) => void) => void;
+  // 検出されたレーンに graphLane を切り替える
+  switchGraphLane: (laneId: string) => void;
   setScrResetMs: (ms: number | null) => void;
   onComplete: (result: ConstantResult) => void;
   onNoteDivChange?: (div: 8 | 12 | 16 | 24 | 32) => void;
@@ -32,12 +36,13 @@ function noteDivLabel(d: NoteDiv): string {
 }
 
 export default function ConstantMode({
-  onScratchInterval,
-  offScratchInterval,
-  onScratchChange,
-  offScratchChange,
-  onScratchReset,
-  offScratchReset,
+  onAnyInput,
+  offAnyInput,
+  onGraphLaneInterval,
+  offGraphLaneInterval,
+  onGraphLaneReset,
+  offGraphLaneReset,
+  switchGraphLane,
   setScrResetMs,
   onComplete,
   onNoteDivChange,
@@ -144,21 +149,21 @@ export default function ConstantMode({
     }
   }, [stop]);
 
-  // 連皿が途切れたら (SCR_RESET 発火) timeout として停止
+  // graphLane の入力が途切れたら timeout として停止
   const onReset = useCallback(() => {
     if (stateRef.current === "running") {
       stop("timeout", null, null);
     }
   }, [stop]);
   useEffect(() => {
-    onScratchReset(onReset);
-    return () => offScratchReset(onReset);
-  }, [onScratchReset, offScratchReset, onReset]);
+    onGraphLaneReset(onReset);
+    return () => offGraphLaneReset(onReset);
+  }, [onGraphLaneReset, offGraphLaneReset, onReset]);
 
   useEffect(() => {
-    onScratchInterval(onInterval);
-    return () => offScratchInterval(onInterval);
-  }, [onScratchInterval, offScratchInterval, onInterval]);
+    onGraphLaneInterval(onInterval);
+    return () => offGraphLaneInterval(onInterval);
+  }, [onGraphLaneInterval, offGraphLaneInterval, onInterval]);
 
   const start = useCallback(() => {
     achievedRef.current = 0;
@@ -174,25 +179,24 @@ export default function ConstantMode({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setScrResetMs]);
 
-  // count=1 (新しい SCR セッションの最初のスクラッチ) を受けて状態遷移
-  const onChange = useCallback((count: number, _dir: number) => {
-    if (count !== 1) return;
+  // ready 中に任意レーンの最初の入力が来たらそのレーンに graphLane を切替して running へ
+  const onFirstInput = useCallback((laneId: string, _nowJs: number) => {
     // done 中なら自動で次の run を開始 (state は ready に戻る)
     if (stateRef.current === "done") {
       start();
     }
-    // ready 中の最初のスクラッチを 1枚目としてカウント (auto-restart 直後もここに来る)
     if (stateRef.current === "ready") {
+      switchGraphLane(laneId);
       stateRef.current = "running";
       setState("running");
       achievedRef.current = 1;
       setAchieved(1);
     }
-  }, [start]);
+  }, [start, switchGraphLane]);
   useEffect(() => {
-    onScratchChange(onChange);
-    return () => offScratchChange(onChange);
-  }, [onScratchChange, offScratchChange, onChange]);
+    onAnyInput(onFirstInput);
+    return () => offAnyInput(onFirstInput);
+  }, [onAnyInput, offAnyInput, onFirstInput]);
 
   const reset = () => {
     stateRef.current = "idle";

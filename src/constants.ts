@@ -39,6 +39,22 @@ export const LANE_DEFS: LaneDef[] = [
   { id: "KEY7", label: "7",   w: 52,  noteColor: "#eee" },
 ];
 
+// ---- 描画用 共通色ヘルパ ---------------------------------------------------
+// 棒グラフの方向インジケータ・タイムラインの軸スパン色など、レーンに紐付く
+// アクセント色を 1 箇所に集約。色を変えたいときはここを 1 箇所変更すれば
+// グラフ・タイムライン両方に反映される。
+//
+// - axisColorPos / axisColorNeg を持つレーン (SCR) は dir 符号で振り分け
+// - 持たないレーン (KEY*) は noteColor を返す (dir は無視)
+export function laneAccentColor(laneId: string, dir: number): string {
+  const lane = LANE_DEFS.find(l => l.id === laneId);
+  if (!lane) return "#ccc";
+  if (lane.axisColorPos && lane.axisColorNeg) {
+    return dir > 0 ? lane.axisColorPos : lane.axisColorNeg;
+  }
+  return lane.noteColor;
+}
+
 // ---- キーコンフィグUI定義 --------------------------------------------------
 
 export const KEY_DEFS = [

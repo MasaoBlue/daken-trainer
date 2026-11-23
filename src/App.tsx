@@ -24,7 +24,7 @@ import type {
 import {
   CANVAS_H, HEADER_H, AXIS_TIMEOUT, SCR_INPUT_DEDUP_MS, SCR_RESET_MS, SPAN_RETAIN,
   CHART_BAR_W, CHART_W, CHART_H, CHART_PAD_L, GREEN_NUM_DEFAULT,
-  LANE_DEFS, KEY_DEFS,
+  LANE_DEFS, KEY_DEFS, laneAccentColor,
 } from "./constants";
 import { nearestNoteDivision, noteColor } from "./lib/noteUtils";
 import { readConfig, writeConfig } from "./lib/storage";
@@ -432,6 +432,7 @@ function drawBarChart(
   scaleMode: "log" | "linear",
   linRange: { minMs: number; maxMs: number },
   constantInfo: { targetMs: number; lowerMs: number; upperMs: number } | null,
+  graphLaneId: string,
 ) {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#111";
@@ -558,7 +559,9 @@ function drawBarChart(
     const yBottom = yBottomAll;
     const yTop = Math.min(Math.max(PAD_T, msToY(ms)), yBottom - DIR_INDICATOR_H);
     const barH = yBottom - yTop;
-    const dirColor = dir > 0 ? "#fa4" : "#4f8";
+    // 上端アクセント色: SCR は方向別 (push/pull)、KEY は lane.noteColor (色定義は
+    // constants.ts の laneAccentColor に集約済み)
+    const dirColor = laneAccentColor(graphLaneId, dir);
 
     const bx = x, bw = barW - 1;
     if (ms === 0) {
@@ -674,11 +677,13 @@ export default function App() {
   const scrLastDirRef   = useRef<number>(0);
   const scrLastEventTimeRef = useRef<number>(-Infinity); // SCRイベント毎に更新（カウント関係なく）
 
-  const [scrInfo, setScrInfo] = useState<ScrInfo>({
+  // 表示用: 現 graphLane の入力情報 (旧 scrInfo を汎用化)。
+  // SCR/KEY どちらでも graphLane に一致した入力でのみ更新される。
+  const [inputInfo, setInputInfo] = useState<ScrInfo>({
     count: 0, intervalMs: null, estimatedBpm: null, offsetMs: null, noteDivision: null,
     avgIntervalMs: null, avgNoteDivision: null,
   });
-  const [scrActive, setScrActive] = useState(false);
+  const [inputActive, setInputActive] = useState(false);
   const scrIntervalHistRef  = useRef<number[]>([]);
   const scrPrevDirTimeRef   = useRef<number | null>(null);
   const scrOriginRef        = useRef<number>(-Infinity);
@@ -730,6 +735,20 @@ export default function App() {
   // チャートスケール (log / linear)
   const [chartScale, setChartScale] = useState<"log" | "linear">("linear");
   const chartScaleRef = useRef<"log" | "linear">("linear");
+
+  // ---- graphLane: グラフ・Input Info カードで表示するレーン ----
+  // "SCR" または "KEY1"〜"KEY7"。SCR はリアルタイムでクラップ/スパン処理を続け
+  // つつ、graphLane が指すレーンの入力だけが Input Info とグラフ棒履歴に反映される。
+  // Challenge / Constant モード時は最初の入力で自動的にそのレーンへ切り替わる。
+  const [graphLane, setGraphLane] = useState<string>("SCR");
+  const graphLaneRef = useRef<string>("SCR");
+  // graphLane が指すレーンの内部状態 (count / interval / 直前入力時刻 / 1セッション平均)
+  const graphLaneCountRef = useRef(0);
+  const graphLanePrevTimeRef = useRef<number | null>(null);
+  const graphLaneLastEventTimeRef = useRef<number>(-Infinity);
+  const graphLaneIntervalsRef = useRef<number[]>([]);
+  // 1枚目の方向 (SCR でのみ意味がある。KEY は 0)
+  const graphLaneFirstDirRef = useRef(0);
 
   // ---- モードタブ ----
   const [appMode, setAppMode] = useState<AppMode>("free");
@@ -874,12 +893,19 @@ export default function App() {
     };
   }, [flushDailyCounts]);
 
-  // ---- ドリルモード・連打モード用コールバックシステム ----
+  // ---- ドリルモード・連打モード用コールバックシステム (SCR 専用) ----
   const scratchResetCallbacks = useRef<Set<(finalCount: number, firstDir: number) => void>>(new Set());
   const scratchChangeCallbacks = useRef<Set<(count: number, dir: number) => void>>(new Set());
-  const scratchIntervalCallbacks = useRef<Set<(intervalMs: number, dir: number) => void>>(new Set());
   const keyDownCallbacks = useRef<Set<(laneId: string) => void>>(new Set());
   const scrFirstDirRef = useRef(0);
+
+  // ---- graphLane 汎用 callback (ConstantMode 等が利用) ----
+  // anyInput: 任意レーンのカウント済み入力ごとに発火 (ready 状態の自動レーン検出用)
+  // graphLaneInterval: 現 graphLane の 2 枚目以降の入力で interval 確定時に発火
+  // graphLaneReset: 現 graphLane のセッションが timeout で終わったときに発火
+  const anyInputCallbacks = useRef<Set<(laneId: string, nowJs: number) => void>>(new Set());
+  const graphLaneIntervalCallbacks = useRef<Set<(intervalMs: number, dir: number) => void>>(new Set());
+  const graphLaneResetCallbacks = useRef<Set<(finalCount: number) => void>>(new Set());
 
   // 連皿しきい値 (基本値、ユーザ設定。500/400/300)
   const [scrResetMsBase, setScrResetMsBase] = useState<number>(SCR_RESET_MS);
@@ -911,11 +937,44 @@ export default function App() {
   const offScratchChange = useCallback((cb: (count: number, dir: number) => void) => {
     scratchChangeCallbacks.current.delete(cb);
   }, []);
-  const onScratchInterval = useCallback((cb: (intervalMs: number, dir: number) => void) => {
-    scratchIntervalCallbacks.current.add(cb);
+  // ---- graphLane callback 購読 API ----
+  const onAnyInput = useCallback((cb: (laneId: string, nowJs: number) => void) => {
+    anyInputCallbacks.current.add(cb);
   }, []);
-  const offScratchInterval = useCallback((cb: (intervalMs: number, dir: number) => void) => {
-    scratchIntervalCallbacks.current.delete(cb);
+  const offAnyInput = useCallback((cb: (laneId: string, nowJs: number) => void) => {
+    anyInputCallbacks.current.delete(cb);
+  }, []);
+  const onGraphLaneInterval = useCallback((cb: (intervalMs: number, dir: number) => void) => {
+    graphLaneIntervalCallbacks.current.add(cb);
+  }, []);
+  const offGraphLaneInterval = useCallback((cb: (intervalMs: number, dir: number) => void) => {
+    graphLaneIntervalCallbacks.current.delete(cb);
+  }, []);
+  const onGraphLaneReset = useCallback((cb: (finalCount: number) => void) => {
+    graphLaneResetCallbacks.current.add(cb);
+  }, []);
+  const offGraphLaneReset = useCallback((cb: (finalCount: number) => void) => {
+    graphLaneResetCallbacks.current.delete(cb);
+  }, []);
+
+  // graphLane を切り替える (内部状態と intervalHistory をリセット)
+  const switchGraphLane = useCallback((laneId: string) => {
+    if (graphLaneRef.current === laneId) return;
+    graphLaneRef.current = laneId;
+    setGraphLane(laneId);
+    graphLaneCountRef.current = 0;
+    graphLanePrevTimeRef.current = null;
+    graphLaneLastEventTimeRef.current = -Infinity;
+    graphLaneIntervalsRef.current = [];
+    graphLaneFirstDirRef.current = 0;
+    intervalHistoryRef.current = [];
+    challengeBarStartIdx.current = 0;
+    challengeBarEndIdx.current = 0;
+    setInputInfo({
+      count: 0, intervalMs: null, estimatedBpm: null, offsetMs: null,
+      noteDivision: null, avgIntervalMs: null, avgNoteDivision: null,
+    });
+    setInputActive(false);
   }, []);
 
   // ---- 記録完了ハンドラ ----
@@ -982,18 +1041,101 @@ export default function App() {
       const resolved = resolveChannel(keyConfigRef.current, ev);
       if (resolved === null) return;
 
+      // graphLane 入力処理 (任意レーン汎用、Input Info / 棒グラフ / Constant
+      // モード用 callback を更新)。laneId が現 graphLane と一致した入力でのみ
+      // 状態更新を行う。
+      const handleGraphLaneInput = (laneId: string, dir: number) => {
+        if (laneId !== graphLaneRef.current) return;
+
+        // graphLane の "last event time" は session reset 判定に使うので毎回更新
+        const prevInputTime = graphLanePrevTimeRef.current;
+        graphLaneLastEventTimeRef.current = nowJs;
+
+        // セッション開始 (graphLaneCount 0→1)
+        if (graphLaneCountRef.current === 0) {
+          graphLaneFirstDirRef.current = dir;
+          graphLaneIntervalsRef.current = [];
+          if (challengeStateRef.current !== "running") {
+            intervalHistoryRef.current = [{ ms: 0, dir }];
+            challengeBarStartIdx.current = 0;
+            challengeBarEndIdx.current = 0;
+          } else {
+            intervalHistoryRef.current = [...intervalHistoryRef.current, { ms: 0, dir }];
+          }
+        }
+        graphLaneCountRef.current += 1;
+
+        // チャレンジモード: ready→running 時に graphLane の bar range 開始位置を記録
+        const addedDummy = graphLaneCountRef.current === 1;
+        if (challengeStateRef.current === "running") {
+          challengeBarEndIdx.current = intervalHistoryRef.current.length;
+        }
+
+        let intervalMs: number | null = null;
+        let estimatedBpm: number | null = null;
+        let offsetMs: number | null = null;
+        let noteDivision: string | null = null;
+        let avgIntervalMs: number | null = null;
+        let avgNoteDivision: string | null = null;
+
+        if (graphLaneCountRef.current >= 2 && prevInputTime !== null && isFinite(prevInputTime)) {
+          intervalMs = Math.floor(nowJs - prevInputTime);
+
+          intervalHistoryRef.current = [
+            ...intervalHistoryRef.current,
+            { ms: intervalMs, dir },
+          ];
+          if (challengeStateRef.current === "running") {
+            challengeIntervalsRef.current.push({ ms: intervalMs, dir });
+            challengeBarEndIdx.current = intervalHistoryRef.current.length;
+          }
+
+          graphLaneIntervalsRef.current.push(intervalMs);
+          const sum = graphLaneIntervalsRef.current.reduce((s, v) => s + v, 0);
+          avgIntervalMs = Math.round(sum / graphLaneIntervalsRef.current.length);
+
+          for (const cb of graphLaneIntervalCallbacks.current) cb(intervalMs, dir);
+
+          // BPM 推定: SCR のみ (1 拍 = 2 スクラッチの 2:1 比率を使うため)
+          if (laneId === "SCR") {
+            const elapsedMs = nowJs - scrOriginRef.current;
+            if (elapsedMs > 0) {
+              estimatedBpm = Math.floor((graphLaneCountRef.current / 2) / (elapsedMs / 60000));
+            }
+          }
+
+          // 拍ズレ計算: BPM グリッドモードなら任意レーンで OK、SCR グリッドモードは
+          // SCR のときだけ scrLastOriginRef を基準に計算
+          const gm = gridModeRef.current;
+          const bpmVal = bpmRef.current;
+          if (bpmVal > 0) {
+            if (gm === "bpm") {
+              const beatMs = 60000 / bpmVal;
+              const beatPhase = ((nowJs - 0) % beatMs + beatMs) % beatMs;
+              const raw = beatPhase <= beatMs / 2 ? beatPhase : beatPhase - beatMs;
+              offsetMs = raw >= 0 ? Math.floor(raw) : -Math.floor(-raw);
+            } else if (gm === "scr" && laneId === "SCR" && isFinite(scrLastOriginRef.current)) {
+              const beatMs = 60000 / bpmVal;
+              const beatPhase = ((nowJs - scrLastOriginRef.current) % beatMs + beatMs) % beatMs;
+              const raw = beatPhase <= beatMs / 2 ? beatPhase : beatPhase - beatMs;
+              offsetMs = raw >= 0 ? Math.floor(raw) : -Math.floor(-raw);
+            }
+            noteDivision = nearestNoteDivision(intervalMs, bpmVal);
+            if (avgIntervalMs !== null) {
+              avgNoteDivision = nearestNoteDivision(avgIntervalMs, bpmVal);
+            }
+          }
+        }
+        // addedDummy は使ってないので警告抑制
+        void addedDummy;
+        graphLanePrevTimeRef.current = nowJs;
+        setInputInfo({ count: graphLaneCountRef.current, intervalMs, estimatedBpm, offsetMs, noteDivision, avgIntervalMs, avgNoteDivision });
+        setInputActive(true);
+      };
+
       // SCR 入力処理 (AxisMove / ButtonDown 共通の単一エントリポイント)。
-      //
-      //   1. 入力判定 (この関数内のみで実施):
-      //      - 方向が変わった → 新規入力
-      //      - 同方向だが前回イベントから SCR_INPUT_DEDUP_MS 以上経過 → 新規入力
-      //      - それ以外 → 同一スクラッチ継続 (何もしない)
-      //   2. 新規入力と判定されたら、レーンスパン / クラップ音 / カウント・履歴・
-      //      callback / チャレンジモード処理を全てまとめて発火する。
-      //
-      // 「入力判定が通ったら全 downstream が確実に動く」状態を保証することで、
-      // 「音は鳴るのに描画が出ない」「カウントは増えないのに span だけ生える」
-      // といった不整合を構造的に防ぐ。
+      // 入力判定 + SCR 専用 downstream (span / clap / scratch session) を担当し、
+      // graphLane 関連の更新は handleGraphLaneInput に委譲する。
       const handleScrInput = (
         ch: Channel,
         dir: number,
@@ -1002,12 +1144,10 @@ export default function App() {
         // === 入力判定 ===
         const gap = nowJs - scrLastEventTimeRef.current;
         const isNewInput = (dir !== scrLastDirRef.current) || (gap >= SCR_INPUT_DEDUP_MS);
-        // 継続判定用 (フィルタ可否によらず last event 時刻は更新)
         scrLastEventTimeRef.current = nowJs;
         if (!isNewInput) return;
 
         scrLastDirRef.current = dir;
-        const prevTime = scrLastTimeRef.current;
         scrLastTimeRef.current = nowJs;
 
         // === レーンスパン: 既存を閉じて新規を push ===
@@ -1018,38 +1158,31 @@ export default function App() {
         // === クラップ音 ===
         if (clapOnRef.current) invoke("play_clap").catch(() => {});
 
-        // === カウント・履歴・コールバック・チャレンジモード ===
+        // === SCR 専用カウント / セッション管理 ===
         if (scrCountRef.current === 0) {
           scrOriginRef.current = nowJs;
           scrLastOriginRef.current = nowJs;
           scrIntervalHistRef.current = [];
           scrPrevDirTimeRef.current = nowJs;
-          // 新しい SCR セッションを履歴に追加
           scrSessionsRef.current.push({ originMs: nowJs, lastInputMs: nowJs });
-          if (challengeStateRef.current !== "running") {
-            intervalHistoryRef.current = [{ ms: 0, dir }];
-            challengeBarStartIdx.current = 0;
-            challengeBarEndIdx.current = 0;
-          } else {
-            intervalHistoryRef.current = [...intervalHistoryRef.current, { ms: 0, dir }];
-          }
         }
-        // 現セッションの lastInputMs を更新
         const curSession = scrSessionsRef.current.at(-1);
         if (curSession) curSession.lastInputMs = nowJs;
         scrCountRef.current += 1;
         setScrCount(scrCountRef.current);
-        // 日別カウント
         dailyScratchCountRef.current += 1;
-        // 最初のスクラッチ方向を記録
         if (scrCountRef.current === 1) scrFirstDirRef.current = dir;
-        // コールバック通知
+        // ドリル/連打モード用コールバック (SCR 専用)
         for (const cb of scratchChangeCallbacks.current) cb(scrCountRef.current, dir);
+        // SCR 専用 interval 蓄積 (drill 等が必要とする場合に備えて維持)
+        if (scrCountRef.current >= 2 && scrPrevDirTimeRef.current !== null) {
+          const sIntMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
+          scrIntervalHistRef.current.push(sIntMs);
+        }
+        scrPrevDirTimeRef.current = nowJs;
 
-        // チャレンジモード: スクラッチカウント
-        const addedDummy = scrCountRef.current === 1; // ダミーを追加した直後
+        // === Challenge モード: 最初の SCR 入力なら scr challenge へ遷移 ===
         if (challengeStateRef.current === "ready") {
-          // 最初の入力がスクラッチ → スクラッチチャレンジ
           challengeInputTypeRef.current = "scr";
           setChallengeInputType("scr");
           challengeStateRef.current = "running";
@@ -1058,68 +1191,18 @@ export default function App() {
           challengeScrCountRef.current = 1;
           setChallengeScrCount(1);
           challengeIntervalsRef.current = [];
-          challengeBarStartIdx.current = addedDummy
-            ? intervalHistoryRef.current.length - 1
-            : intervalHistoryRef.current.length;
+          switchGraphLane("SCR");
+          challengeBarStartIdx.current = intervalHistoryRef.current.length;
         } else if (challengeStateRef.current === "running" && challengeInputTypeRef.current === "scr") {
           challengeScrCountRef.current += 1;
           setChallengeScrCount(challengeScrCountRef.current);
         }
 
-        let intervalMs: number | null = null;
-        let estimatedBpm: number | null = null;
-        let offsetMs: number | null = null;
-        let noteDivision: string | null = null;
-        let avgIntervalMs: number | null = null;
-        let avgNoteDivision: string | null = null;
+        // === graphLane 処理 (現 graphLane が SCR ならここで反映される) ===
+        handleGraphLaneInput("SCR", dir);
 
-        if (scrCountRef.current >= 2 && scrPrevDirTimeRef.current !== null && isFinite(prevTime)) {
-          intervalMs = Math.floor(nowJs - scrPrevDirTimeRef.current);
-
-          // 棒グラフ履歴を更新
-          intervalHistoryRef.current = [
-            ...intervalHistoryRef.current,
-            { ms: intervalMs, dir },
-          ];
-          // チャレンジモード: インターバル記録
-          if (challengeStateRef.current === "running") {
-            challengeIntervalsRef.current.push({ ms: intervalMs, dir });
-          }
-
-          // 連続スクラッチ中の interval を蓄積し、平均を算出
-          scrIntervalHistRef.current.push(intervalMs);
-          const sum = scrIntervalHistRef.current.reduce((s, v) => s + v, 0);
-          avgIntervalMs = Math.round(sum / scrIntervalHistRef.current.length);
-
-          // Constant モード等向け interval コールバック通知
-          for (const cb of scratchIntervalCallbacks.current) cb(intervalMs, dir);
-
-          const elapsedMs = nowJs - scrOriginRef.current;
-          if (elapsedMs > 0 && scrCountRef.current >= 2) {
-            estimatedBpm = Math.floor((scrCountRef.current / 2) / (elapsedMs / 60000));
-          }
-          const gm = gridModeRef.current;
-          const bpmVal = bpmRef.current;
-          if ((gm === "bpm" || gm === "scr") && bpmVal > 0) {
-            const beatMs = 60000 / bpmVal;
-            const origin = gm === "scr" ? scrLastOriginRef.current : 0;
-            if (isFinite(origin)) {
-              const beatPhase = ((nowJs - origin) % beatMs + beatMs) % beatMs;
-              const raw = beatPhase <= beatMs / 2 ? beatPhase : beatPhase - beatMs;
-              offsetMs = raw >= 0 ? Math.floor(raw) : -Math.floor(-raw);
-            }
-          }
-          // 音符区分（設定BPMを基準に判定）
-          if (bpmVal > 0) {
-            noteDivision = nearestNoteDivision(intervalMs, bpmVal);
-            if (avgIntervalMs !== null) {
-              avgNoteDivision = nearestNoteDivision(avgIntervalMs, bpmVal);
-            }
-          }
-        }
-        scrPrevDirTimeRef.current = nowJs;
-        setScrInfo({ count: scrCountRef.current, intervalMs, estimatedBpm, offsetMs, noteDivision, avgIntervalMs, avgNoteDivision });
-        setScrActive(true);
+        // === 任意レーン入力 callback (Constant モード等が ready 状態で受け取る) ===
+        for (const cb of anyInputCallbacks.current) cb("SCR", nowJs);
       };
 
       if (ev.kind === "ButtonDown") {
@@ -1153,10 +1236,17 @@ export default function App() {
             setChallengeKeyCount(1);
             setChallengeKeyLabel(resolved.laneId);
             challengeKeyLabelRef.current = resolved.laneId;
+            // graphLane を検出されたキーへ自動切替し、bar range 開始位置を記録
+            switchGraphLane(resolved.laneId);
+            challengeBarStartIdx.current = intervalHistoryRef.current.length;
           } else if (challengeStateRef.current === "running" && challengeInputTypeRef.current === "key" && resolved.laneId === challengeKeyLabelRef.current) {
             challengeKeyCountRef.current += 1;
             setChallengeKeyCount(challengeKeyCountRef.current);
           }
+          // graphLane が一致するならグラフ・Input Info を更新
+          handleGraphLaneInput(resolved.laneId, 0);
+          // ready 状態の Constant モード等が最初の入力をフックする経路
+          for (const cb of anyInputCallbacks.current) cb(resolved.laneId, nowJs);
         }
       } else if (ev.kind === "ButtonUp") {
         const ch = getOrCreateChannel(ev.source, resolved.laneId, resolved.kind);
@@ -1225,7 +1315,7 @@ export default function App() {
               : null;
             const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, constantThresholdRatioRef.current);
             const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
-            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr, chartScaleRef.current, linRange, ci);
+            drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cbr, chartScaleRef.current, linRange, ci, graphLaneRef.current);
           }
         }
       });
@@ -1305,6 +1395,7 @@ export default function App() {
       // scrLastTimeRef (= 直近にカウントされた入力) を使うと、ゆっくり同方向回転中に
       // 継続イベントが filter され続けていても scrLastTimeRef が更新されないため、
       // 入力が来ているのに session reset が走ってしまい「一定間隔で1枚目」が再発する。
+      // SCR 専用 session reset (clap / span / drill 用)
       if (scrCountRef.current > 0 && nowMs - scrLastEventTimeRef.current > scrResetMsRef.current) {
         const finalCount = scrCountRef.current;
         const firstDir = scrFirstDirRef.current;
@@ -1315,9 +1406,20 @@ export default function App() {
         scrPrevDirTimeRef.current = null;
         scrIntervalHistRef.current = [];
         setScrCount(0);
-        setScrActive(false);
-        // ドリルモード用コールバック通知
+        // ドリルモード用コールバック通知 (SCR 専用)
         for (const cb of scratchResetCallbacks.current) cb(finalCount, firstDir);
+      }
+
+      // graphLane 汎用 session reset (Input Info / Constant モード timeout 用)
+      if (graphLaneCountRef.current > 0 && nowMs - graphLaneLastEventTimeRef.current > scrResetMsRef.current) {
+        const finalCount = graphLaneCountRef.current;
+        graphLaneCountRef.current = 0;
+        graphLanePrevTimeRef.current = null;
+        graphLaneLastEventTimeRef.current = -Infinity;
+        graphLaneIntervalsRef.current = [];
+        graphLaneFirstDirRef.current = 0;
+        setInputActive(false);
+        for (const cb of graphLaneResetCallbacks.current) cb(finalCount);
       }
 
       const cutoff = nowMs - SPAN_RETAIN;
@@ -1389,7 +1491,7 @@ export default function App() {
         }
         const ci = computeConstantInfo(appModeRef.current, bpmRef.current, constantNoteDivRef.current, constantThresholdRatioRef.current);
         const linRange = computeLinRange(ci, scrResetMsBaseRef.current);
-        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange, chartScaleRef.current, linRange, ci);
+        drawBarChart(chartCtxRef.current, intervalHistoryRef.current, bpmRef.current, cw, CHART_H, cBarRange, chartScaleRef.current, linRange, ci, graphLaneRef.current);
       }
       // チャレンジモード: タイマー更新
       if (challengeStateRef.current === "running") {
@@ -1778,12 +1880,13 @@ export default function App() {
         {/* Constantモード */}
         {appMode === "constant" && (
           <ConstantMode
-            onScratchInterval={onScratchInterval}
-            offScratchInterval={offScratchInterval}
-            onScratchChange={onScratchChange}
-            offScratchChange={offScratchChange}
-            onScratchReset={onScratchReset}
-            offScratchReset={offScratchReset}
+            onAnyInput={onAnyInput}
+            offAnyInput={offAnyInput}
+            onGraphLaneInterval={onGraphLaneInterval}
+            offGraphLaneInterval={offGraphLaneInterval}
+            onGraphLaneReset={onGraphLaneReset}
+            offGraphLaneReset={offGraphLaneReset}
+            switchGraphLane={switchGraphLane}
             setScrResetMs={setScrResetMs}
             onComplete={handleConstantComplete}
             onNoteDivChange={(d) => {
@@ -2055,27 +2158,27 @@ export default function App() {
         {/* SCR 情報パネル */}
         <Card className="h-fit min-w-24">
           <CardHeader className="pb-2 pt-3 px-3">
-            <CardTitle className="text-xs text-muted-foreground">Scratch Info</CardTitle>
+            <CardTitle className="text-xs text-muted-foreground">Input Info</CardTitle>
           </CardHeader>
           <CardContent className="px-3 pb-3 flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">連続枚数</span>
-              <span className={`text-sm font-bold tabular-nums ${scrInfo.count > 0 ? "text-yellow-300" : "text-muted"}`}>
-                {scrInfo.count > 0 ? scrInfo.count : "—"}
+              <span className={`text-sm font-bold tabular-nums ${inputInfo.count > 0 ? "text-yellow-300" : "text-muted"}`}>
+                {inputInfo.count > 0 ? inputInfo.count : "—"}
               </span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">間隔</span>
-              <span className={`text-xs tabular-nums font-mono ${scrActive ? "text-white" : "text-zinc-400"}`}>
-                <span className="inline-block w-12 text-right">{scrInfo.intervalMs !== null ? `${scrInfo.intervalMs}ms` : "—"}</span>
-                <span className="inline-block w-16 text-right">{scrInfo.noteDivision ? `(${scrInfo.noteDivision})` : ""}</span>
+              <span className={`text-xs tabular-nums font-mono ${inputActive ? "text-white" : "text-zinc-400"}`}>
+                <span className="inline-block w-12 text-right">{inputInfo.intervalMs !== null ? `${inputInfo.intervalMs}ms` : "—"}</span>
+                <span className="inline-block w-16 text-right">{inputInfo.noteDivision ? `(${inputInfo.noteDivision})` : ""}</span>
               </span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">平均間隔</span>
-              <span className={`text-xs tabular-nums font-mono ${scrActive ? "text-white" : "text-zinc-400"}`}>
-                <span className="inline-block w-12 text-right">{scrInfo.avgIntervalMs !== null ? `${scrInfo.avgIntervalMs}ms` : "—"}</span>
-                <span className="inline-block w-16 text-right">{scrInfo.avgNoteDivision ? `(${scrInfo.avgNoteDivision})` : ""}</span>
+              <span className={`text-xs tabular-nums font-mono ${inputActive ? "text-white" : "text-zinc-400"}`}>
+                <span className="inline-block w-12 text-right">{inputInfo.avgIntervalMs !== null ? `${inputInfo.avgIntervalMs}ms` : "—"}</span>
+                <span className="inline-block w-16 text-right">{inputInfo.avgNoteDivision ? `(${inputInfo.avgNoteDivision})` : ""}</span>
               </span>
             </div>
           </CardContent>
@@ -2088,7 +2191,26 @@ export default function App() {
       <Card className="w-full">
         <CardHeader className="pb-1 pt-3 px-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-xs text-muted-foreground">Scratch Speed</CardTitle>
+            <div className="flex items-center gap-3">
+              <CardTitle className="text-xs text-muted-foreground">Input Speed</CardTitle>
+              {/* 手動レーン切替 (Free モード時のみ。Challenge/Constant は自動検出) */}
+              {appMode === "free" && (
+                <Select
+                  value={graphLane}
+                  onValueChange={(v) => switchGraphLane(v)}
+                >
+                  <SelectTrigger className="h-6 w-20 text-[10px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="SCR" className="text-xs">Scratch</SelectItem>
+                    {LANE_DEFS.filter(l => l.id.startsWith("KEY")).map(l => (
+                      <SelectItem key={l.id} value={l.id} className="text-xs">{l.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
             <div className="flex gap-1">
               {(["linear", "log"] as const).map(s => (
                 <Button
@@ -2148,9 +2270,11 @@ export default function App() {
                   style={{ left: chartTooltip.x, top: chartTooltip.y - 36, background: "rgba(20,20,20,0.95)" }}
                 >
                   <span className="text-muted-foreground">#{chartTooltip.idx}</span>
-                  <span style={{ color: chartTooltip.entry.dir > 0 ? "#fa4" : "#4f8" }} className="ml-2">
-                    {chartTooltip.entry.dir > 0 ? "↷" : "↶"}
-                  </span>
+                  {graphLane === "SCR" && (
+                    <span style={{ color: laneAccentColor("SCR", chartTooltip.entry.dir) }} className="ml-2">
+                      {chartTooltip.entry.dir > 0 ? "↷" : "↶"}
+                    </span>
+                  )}
                   <span className="ml-1 text-foreground">{chartTooltip.entry.ms}ms</span>
                   {bpm > 0 && (
                     <span className="ml-2 text-cyan-300">
